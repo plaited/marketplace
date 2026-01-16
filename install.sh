@@ -118,12 +118,12 @@ get_plugin_names() {
 
 get_plugin_source() {
   local plugin_name="$1"
-  # Find the plugin block and extract its source
-  # This is a simplified parser - works for our known JSON structure
+  # Find the plugin block and extract its source.repo value
+  # Source is now an object: { "source": "github", "repo": "org/repo" }
   awk -v name="$plugin_name" '
     /"name"[[:space:]]*:[[:space:]]*"'"$plugin_name"'"/ { found=1 }
-    found && /"source"[[:space:]]*:/ {
-      gsub(/.*"source"[[:space:]]*:[[:space:]]*"/, "")
+    found && /"repo"[[:space:]]*:/ {
+      gsub(/.*"repo"[[:space:]]*:[[:space:]]*"/, "")
       gsub(/".*/, "")
       print
       exit
@@ -144,28 +144,11 @@ get_plugin_description() {
   ' "$MARKETPLACE_JSON"
 }
 
-# Parse source like "github:plaited/typescript-lsp/plugin"
-# Returns: repo_url sparse_path
+# Parse source repo like "plaited/development-skills"
+# Returns: repo_url sparse_path (always .claude)
 parse_source() {
-  local source="$1"
-
-  # Remove "github:" prefix
-  local path="${source#github:}"
-
-  # Split by first /
-  local org="${path%%/*}"
-  local rest="${path#*/}"
-
-  # Split rest into repo and sparse path
-  local repo="${rest%%/*}"
-  local sparse_path="${rest#*/}"
-
-  # If sparse_path equals repo, there's no subpath (use default)
-  if [ "$sparse_path" = "$repo" ]; then
-    sparse_path=".claude"
-  fi
-
-  echo "https://github.com/$org/$repo.git" "$sparse_path"
+  local repo="$1"
+  echo "https://github.com/$repo.git" ".claude"
 }
 
 # ============================================================================
