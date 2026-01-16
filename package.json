@@ -1,0 +1,14 @@
+{
+  "name": "plaited-marketplace",
+  "private": "true",
+  "description": "Aggregator for Plaited's Claude Code plugins",
+  "type": "module",
+  "scripts": {
+    "test": "bun test",
+    "check": "bun run test"
+  },
+  "license": "ISC",
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "name": "plaited-plugins",
+  "owner": {
+    "name": "Plaited Labs"
+  },
+  "plugins": [
+    {
+      "name": "development-skills",
+      "description": "Development skills for Claude Code - TypeScript LSP, code documentation, and validation tools",
+      "source": "github:plaited/development-skills/plugin",
+      "category": "development",
+      "keywords": ["typescript", "javascript", "lsp", "language-server", "symbols", "refactoring", "documentation", "validation"]
+    },
+    {
+      "name": "acp-harness",
+      "description": "ACP client and evaluation harness for agent testing",
+      "source": "github:plaited/acp-harness/.claude",
+      "category": "development",
+      "keywords": ["acp", "evaluation", "testing", "harness", "agents", "benchmarking"]
+    },
+    {
+      "name": "plaited",
+      "description": "Plaited framework development tools - behavioral programming, UI patterns, and web components",
+      "source": "github:plaited/plaited/.claude",
+      "category": "development",
+      "keywords": ["plaited", "behavioral-programming", "ui-patterns", "web-patterns", "web-components", "loom", "standards"]
+    }
+  ]
+}
