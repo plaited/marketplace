@@ -68,16 +68,8 @@ supports_commands() {
 }
 
 parse_source() {
-  local source="$1"
-  local path="\${source#github:}"
-  local org="\${path%%/*}"
-  local rest="\${path#*/}"
-  local repo="\${rest%%/*}"
-  local sparse_path="\${rest#*/}"
-  if [ "$sparse_path" = "$repo" ]; then
-    sparse_path=".claude"
-  fi
-  echo "https://github.com/$org/$repo.git" "$sparse_path"
+  local repo="$1"
+  echo "https://github.com/$repo.git" ".claude"
 }
 
 get_plugin_names() {
@@ -99,8 +91,8 @@ get_plugin_source() {
   local plugin_name="$1"
   awk '
     /"name"[[:space:]]*:[[:space:]]*"'"$plugin_name"'"/ { found=1 }
-    found && /"source"[[:space:]]*:/ {
-      gsub(/.*"source"[[:space:]]*:[[:space:]]*"/, "")
+    found && /"repo"[[:space:]]*:/ {
+      gsub(/.*"repo"[[:space:]]*:[[:space:]]*"/, "")
       gsub(/".*/, "")
       print
       exit
@@ -153,11 +145,12 @@ ${fn} ${quotedArgs}
 describe("marketplace.json", () => {
   let marketplace: {
     name: string;
+    metadata?: { description: string };
     owner: { name: string };
     plugins: Array<{
       name: string;
       description: string;
-      source: string;
+      source: { source: string; repo: string };
       category: string;
       keywords?: string[];
     }>;
@@ -191,8 +184,10 @@ describe("marketplace.json", () => {
       expect(typeof plugin.description).toBe("string");
 
       expect(plugin.source).toBeDefined();
-      expect(typeof plugin.source).toBe("string");
-      expect(plugin.source.startsWith("github:")).toBe(true);
+      expect(typeof plugin.source).toBe("object");
+      expect(plugin.source.source).toBe("github");
+      expect(plugin.source.repo).toBeDefined();
+      expect(typeof plugin.source.repo).toBe("string");
 
       expect(plugin.category).toBeDefined();
       expect(typeof plugin.category).toBe("string");
@@ -217,9 +212,10 @@ describe("marketplace.json", () => {
   });
 
   test("plugin sources are valid github format", () => {
-    const sourceRegex = /^github:[a-zA-Z0-9_-]+\/[a-zA-Z0-9_-]+(\/[a-zA-Z0-9_.-]+)?$/;
+    const repoRegex = /^[a-zA-Z0-9_-]+\/[a-zA-Z0-9_-]+$/;
     for (const plugin of marketplace.plugins) {
-      expect(plugin.source).toMatch(sourceRegex);
+      expect(plugin.source.source).toBe("github");
+      expect(plugin.source.repo).toMatch(repoRegex);
     }
   });
 });
@@ -292,28 +288,20 @@ describe("install.sh - supports_commands", () => {
 });
 
 describe("install.sh - parse_source", () => {
-  test("parses source with subpath", async () => {
+  test("parses repo and always uses .claude", async () => {
     const result = await callFunction(
       "parse_source",
-      "github:plaited/typescript-lsp/plugin"
+      "plaited/typescript-lsp"
     );
-    expect(result).toBe("https://github.com/plaited/typescript-lsp.git plugin");
+    expect(result).toBe("https://github.com/plaited/typescript-lsp.git .claude");
   });
 
-  test("parses source with .claude subpath", async () => {
+  test("parses another repo format", async () => {
     const result = await callFunction(
       "parse_source",
-      "github:plaited/acp-harness/.claude"
+      "plaited/acp-harness"
     );
     expect(result).toBe("https://github.com/plaited/acp-harness.git .claude");
-  });
-
-  test("parses source without subpath (defaults to .claude)", async () => {
-    const result = await callFunction(
-      "parse_source",
-      "github:plaited/somerepo"
-    );
-    expect(result).toBe("https://github.com/plaited/somerepo.git .claude");
   });
 });
 
@@ -331,13 +319,13 @@ describe("install.sh - JSON parsing functions", () => {
     expect(names.sort()).toEqual(expectedNames.sort());
   });
 
-  test("get_plugin_source returns correct source for each plugin", async () => {
+  test("get_plugin_source returns correct repo for each plugin", async () => {
     const content = await readFile(MARKETPLACE_JSON, "utf-8");
     const marketplace = JSON.parse(content);
 
     for (const plugin of marketplace.plugins) {
       const result = await callFunction("get_plugin_source", plugin.name);
-      expect(result).toBe(plugin.source);
+      expect(result).toBe(plugin.source.repo);
     }
   });
 
