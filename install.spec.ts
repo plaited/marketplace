@@ -1098,4 +1098,83 @@ get_scoped_skill_name "${skillName}" "${repo}"
         .toBe("skill@org.name_project");
     });
   });
+
+  describe("install_project scoping logic", () => {
+    // This tests the actual logic flow in install_project:
+    // - If skill is already scoped -> preserve as-is
+    // - If skill is not scoped -> add scope
+    async function simulateInstallSkill(skillName: string, repo: string): Promise<string> {
+      const script = `
+is_scoped_skill() {
+  local skill_name="$1"
+  [[ "$skill_name" =~ ^.+@[a-zA-Z0-9._-]+_[a-zA-Z0-9._-]+$ ]]
+}
+
+extract_org_from_repo() {
+  local repo="$1"
+  echo "\${repo%%/*}"
+}
+
+get_scoped_skill_name() {
+  local skill_name="$1"
+  local repo="$2"
+  local org project_name
+  org=$(extract_org_from_repo "$repo")
+  project_name="\${repo##*/}"
+  echo "\${skill_name}@\${org}_\${project_name}"
+}
+
+# Simulate install_project logic
+skill_name="${skillName}"
+repo="${repo}"
+
+if is_scoped_skill "$skill_name"; then
+  # Already scoped - would copy as-is
+  echo "$skill_name"
+else
+  # Not scoped - would rename with scope
+  get_scoped_skill_name "$skill_name" "$repo"
+fi
+`;
+      const result = await $`bash -c ${script}`.quiet();
+      return result.text().trim();
+    }
+
+    test("does not double-scope an already scoped skill", async () => {
+      // Simulating: acp-harness inherits code-documentation@plaited_development-skills
+      // When installed from acp-harness, it should NOT become:
+      // code-documentation@plaited_development-skills@plaited_acp-harness
+      const result = await simulateInstallSkill(
+        "code-documentation@plaited_development-skills",
+        "plaited/acp-harness"
+      );
+      expect(result).toBe("code-documentation@plaited_development-skills");
+      expect(result).not.toContain("@plaited_acp-harness");
+    });
+
+    test("does not double-scope inherited skill from different org", async () => {
+      const result = await simulateInstallSkill(
+        "my-skill@other-org_other-project",
+        "plaited/acp-harness"
+      );
+      expect(result).toBe("my-skill@other-org_other-project");
+    });
+
+    test("scopes an unscoped skill from the installing project", async () => {
+      // acp-harness's own skill (unscoped) should get scoped
+      const result = await simulateInstallSkill(
+        "harness-skill",
+        "plaited/acp-harness"
+      );
+      expect(result).toBe("harness-skill@plaited_acp-harness");
+    });
+
+    test("scopes simple skill name", async () => {
+      const result = await simulateInstallSkill(
+        "typescript-lsp",
+        "plaited/development-skills"
+      );
+      expect(result).toBe("typescript-lsp@plaited_development-skills");
+    });
+  });
 });
