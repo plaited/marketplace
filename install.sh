@@ -935,14 +935,17 @@ do_list() {
 # ============================================================================
 
 do_update() {
-  local specific_project="$1"
-  local agent
-  agent=$(detect_agent)
+  local agent="$1"
+  local specific_project="$2"
 
+  # Use provided agent or detect from existing installation
   if [ -z "$agent" ]; then
-    print_error "No existing installation detected"
-    print_info "Run without --update to install"
-    exit 1
+    agent=$(detect_agent)
+    if [ -z "$agent" ]; then
+      print_error "No existing installation detected"
+      print_info "Run without --update to install, or specify --agent"
+      exit 1
+    fi
   fi
 
   print_info "Updating installation for: $agent"
@@ -994,13 +997,17 @@ do_update() {
 # ============================================================================
 
 do_uninstall() {
-  local specific_project="$1"
-  local agent
-  agent=$(detect_agent)
+  local agent="$1"
+  local specific_project="$2"
 
+  # Use provided agent or detect from existing installation
   if [ -z "$agent" ]; then
-    print_error "No existing installation detected"
-    exit 1
+    agent=$(detect_agent)
+    if [ -z "$agent" ]; then
+      print_error "No existing installation detected"
+      print_info "Specify --agent to uninstall a specific agent"
+      exit 1
+    fi
   fi
 
   print_info "Uninstalling for: $agent"
@@ -1203,10 +1210,10 @@ main() {
       do_install "$agent" "$project"
       ;;
     update)
-      do_update "$project"
+      do_update "$agent" "$project"
       ;;
     uninstall)
-      do_uninstall "$project"
+      do_uninstall "$agent" "$project"
       ;;
   esac
 }
