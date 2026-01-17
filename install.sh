@@ -831,22 +831,22 @@ install_project() {
             cp "$md_file" "$commands_dir/$scoped_name.md"
             print_info "  Installed: /$scoped_name"
           done
-        print_success "Installed $project_name commands"
-        ;;
+          print_success "Installed $project_name commands"
+          ;;
 
-      *)
-        # Fallback: direct copy with prefix for unknown agents
-        mkdir -p "$commands_dir"
-        for md_file in "$source_commands"/*.md; do
-          [ -f "$md_file" ] || continue
-          local cmd_name
-          cmd_name=$(basename "$md_file" .md)
-          local scoped_name="${scope}--${cmd_name}"
-          cp "$md_file" "$commands_dir/$scoped_name.md"
-          print_info "  Installed: /$scoped_name"
-        done
-        print_success "Installed $project_name commands"
-        ;;
+        *)
+          # Fallback: direct copy with prefix for unknown agents
+          mkdir -p "$commands_dir"
+          for md_file in "$source_commands"/*.md; do
+            [ -f "$md_file" ] || continue
+            local cmd_name
+            cmd_name=$(basename "$md_file" .md)
+            local scoped_name="${scope}--${cmd_name}"
+            cp "$md_file" "$commands_dir/$scoped_name.md"
+            print_info "  Installed: /$scoped_name"
+          done
+          print_success "Installed $project_name commands"
+          ;;
       esac
     fi
   fi
