@@ -1,6 +1,6 @@
 #!/bin/bash
 # Install Plaited skills for AI coding agents supporting agent-skills-spec
-# Supports: Gemini CLI, GitHub Copilot, Cursor, OpenCode, Amp, Goose, Factory, Codex, Windsurf
+# Supports: Gemini CLI, GitHub Copilot, Cursor, OpenCode, Amp, Goose, Factory, Codex, Windsurf, Claude Code
 #
 # Usage:
 #   ./install.sh                         # Interactive: asks which agent
@@ -80,6 +80,7 @@ get_skills_dir() {
     factory)  echo ".factory/skills" ;;
     codex)    echo ".codex/skills" ;;
     windsurf) echo ".windsurf/skills" ;;
+    claude)   echo ".claude/skills" ;;
     *)        echo "" ;;
   esac
 }
@@ -95,6 +96,7 @@ get_commands_dir() {
     factory)  echo ".factory/commands" ;;
     codex)    echo "" ;;                   # Codex uses ~/.codex/prompts/ (user-scoped)
     windsurf) echo ".windsurf/workflows" ;; # Windsurf uses workflows, not commands
+    claude)   echo ".claude/commands" ;;
     *)        echo "" ;;
   esac
 }
@@ -113,7 +115,7 @@ get_prompts_dir() {
 supports_commands() {
   # Agents that support slash commands (native or converted)
   case "$1" in
-    gemini|cursor|opencode|amp|factory) return 0 ;;
+    gemini|cursor|opencode|amp|factory|claude) return 0 ;;
     codex|windsurf) return 0 ;;  # Supported via conversion
     *) return 1 ;;
   esac
@@ -461,7 +463,7 @@ convert_md_to_windsurf_workflow() {
 detect_agent() {
   # Agent detection: directory -> agent name mapping
   # Using loop for maintainability (easier to add new agents)
-  local agents=".gemini:gemini .github:copilot .cursor:cursor .opencode:opencode .amp:amp .goose:goose .factory:factory .codex:codex .windsurf:windsurf"
+  local agents=".gemini:gemini .github:copilot .cursor:cursor .opencode:opencode .amp:amp .goose:goose .factory:factory .codex:codex .windsurf:windsurf .claude:claude"
 
   for entry in $agents; do
     local dir="${entry%%:*}"
@@ -481,19 +483,20 @@ ask_agent() {
 
   echo "Which AI coding agent are you using?"
   echo ""
-  echo "  ┌─────────────┬────────────────────┐"
-  echo "  │ Agent       │ Directory          │"
-  echo "  ├─────────────┼────────────────────┤"
-  echo "  │ 1) Gemini   │ .gemini/skills     │"
-  echo "  │ 2) Copilot  │ .github/skills     │"
-  echo "  │ 3) Cursor   │ .cursor/skills     │"
-  echo "  │ 4) OpenCode │ .opencode/skill    │"
-  echo "  │ 5) Amp      │ .amp/skills        │"
-  echo "  │ 6) Goose    │ .goose/skills      │"
-  echo "  │ 7) Factory  │ .factory/skills    │"
-  echo "  │ 8) Codex    │ .codex/skills      │"
-  echo "  │ 9) Windsurf │ .windsurf/skills   │"
-  echo "  └─────────────┴────────────────────┘"
+  echo "  ┌──────────────┬────────────────────┐"
+  echo "  │ Agent        │ Directory          │"
+  echo "  ├──────────────┼────────────────────┤"
+  echo "  │ 1) Gemini    │ .gemini/skills     │"
+  echo "  │ 2) Copilot   │ .github/skills     │"
+  echo "  │ 3) Cursor    │ .cursor/skills     │"
+  echo "  │ 4) OpenCode  │ .opencode/skill    │"
+  echo "  │ 5) Amp       │ .amp/skills        │"
+  echo "  │ 6) Goose     │ .goose/skills      │"
+  echo "  │ 7) Factory   │ .factory/skills    │"
+  echo "  │ 8) Codex     │ .codex/skills      │"
+  echo "  │ 9) Windsurf  │ .windsurf/skills   │"
+  echo "  │ 10) Claude   │ .claude/skills     │"
+  echo "  └──────────────┴────────────────────┘"
   echo ""
 
   if [ -n "$detected" ]; then
@@ -501,7 +504,7 @@ ask_agent() {
     echo ""
   fi
 
-  printf "Select agent [1-9]: "
+  printf "Select agent [1-10]: "
   read choice
 
   case "$choice" in
@@ -514,6 +517,7 @@ ask_agent() {
     7) echo "factory" ;;
     8) echo "codex" ;;
     9) echo "windsurf" ;;
+    10) echo "claude" ;;
     *)
       print_error "Invalid choice"
       exit 1
@@ -875,19 +879,20 @@ show_help() {
   echo ""
   echo "Supported Agents:"
   echo ""
-  echo "  ┌─────────────┬──────────────────────┬────────────────────────────┐"
-  echo "  │ Agent       │ Skills               │ Commands                   │"
-  echo "  ├─────────────┼──────────────────────┼────────────────────────────┤"
-  echo "  │ gemini      │ .gemini/skills       │ .gemini/commands (→TOML)   │"
-  echo "  │ copilot     │ .github/skills       │ -                          │"
-  echo "  │ cursor      │ .cursor/skills       │ .cursor/commands           │"
-  echo "  │ opencode    │ .opencode/skill      │ .opencode/command          │"
-  echo "  │ amp         │ .amp/skills          │ .amp/commands              │"
-  echo "  │ goose       │ .goose/skills        │ -                          │"
-  echo "  │ factory     │ .factory/skills      │ .factory/commands          │"
-  echo "  │ codex       │ .codex/skills        │ ~/.codex/prompts (→prompt) │"
-  echo "  │ windsurf    │ .windsurf/skills     │ .windsurf/workflows        │"
-  echo "  └─────────────┴──────────────────────┴────────────────────────────┘"
+  echo "  ┌──────────────┬──────────────────────┬────────────────────────────┐"
+  echo "  │ Agent        │ Skills               │ Commands                   │"
+  echo "  ├──────────────┼──────────────────────┼────────────────────────────┤"
+  echo "  │ gemini       │ .gemini/skills       │ .gemini/commands (→TOML)   │"
+  echo "  │ copilot      │ .github/skills       │ -                          │"
+  echo "  │ cursor       │ .cursor/skills       │ .cursor/commands           │"
+  echo "  │ opencode     │ .opencode/skill      │ .opencode/command          │"
+  echo "  │ amp          │ .amp/skills          │ .amp/commands              │"
+  echo "  │ goose        │ .goose/skills        │ -                          │"
+  echo "  │ factory      │ .factory/skills      │ .factory/commands          │"
+  echo "  │ codex        │ .codex/skills        │ ~/.codex/prompts (→prompt) │"
+  echo "  │ windsurf     │ .windsurf/skills     │ .windsurf/workflows        │"
+  echo "  │ claude       │ .claude/skills       │ .claude/commands           │"
+  echo "  └──────────────┴──────────────────────┴────────────────────────────┘"
   echo ""
   echo "Examples:"
   echo "  ./install.sh                              # Interactive mode"
@@ -999,7 +1004,7 @@ main() {
       skills_dir=$(get_skills_dir "$agent")
       if [ -z "$skills_dir" ]; then
         print_error "Unknown agent: $agent"
-        print_info "Valid agents: gemini, copilot, cursor, opencode, amp, goose, factory, codex, windsurf"
+        print_info "Valid agents: gemini, copilot, cursor, opencode, amp, goose, factory, codex, windsurf, claude"
         exit 1
       fi
 
