@@ -1,7 +1,7 @@
 {
-  "name": "plaited-marketplace",
   "private": "true",
-  "description": "Aggregator for Plaited's Claude Code plugins",
+  "name": "@plaited/skills-installer",
+  "description": "Install Plaited skills for agent-skills-spec compatible AI coding agents",
   "type": "module",
   "scripts": {
     "test": "bun test",

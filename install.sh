@@ -1,6 +1,6 @@
 #!/bin/bash
 # Install Plaited skills for AI coding agents supporting agent-skills-spec
-# Supports: Gemini CLI, GitHub Copilot, Cursor, OpenCode, Amp, Goose, Factory
+# Supports: Gemini CLI, GitHub Copilot, Cursor, OpenCode, Amp, Goose, Factory, Codex, Windsurf
 #
 # Usage:
 #   ./install.sh                         # Interactive: asks which agent
@@ -34,6 +34,8 @@ get_skills_dir() {
     amp)      echo ".amp/skills" ;;
     goose)    echo ".goose/skills" ;;
     factory)  echo ".factory/skills" ;;
+    codex)    echo ".codex/skills" ;;
+    windsurf) echo ".windsurf/skills" ;;
     *)        echo "" ;;
   esac
 }
@@ -47,14 +49,33 @@ get_commands_dir() {
     amp)      echo ".amp/commands" ;;
     goose)    echo ".goose/commands" ;;
     factory)  echo ".factory/commands" ;;
+    codex)    echo "" ;;                   # Codex uses ~/.codex/prompts/ (user-scoped)
+    windsurf) echo ".windsurf/workflows" ;; # Windsurf uses workflows, not commands
     *)        echo "" ;;
   esac
 }
 
+# Get the prompts directory for agents that use user-scoped prompts
+get_prompts_dir() {
+  case "$1" in
+    codex) echo "$HOME/.codex/prompts" ;;
+    *)     echo "" ;;
+  esac
+}
+
 supports_commands() {
-  # Agents that support slash commands
+  # Agents that support slash commands (native or converted)
   case "$1" in
     gemini|cursor|opencode|amp|factory) return 0 ;;
+    codex|windsurf) return 0 ;;  # Supported via conversion
+    *) return 1 ;;
+  esac
+}
+
+# Check if agent needs command format conversion
+needs_command_conversion() {
+  case "$1" in
+    gemini|codex|windsurf) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -170,6 +191,169 @@ convert_md_to_toml() {
   } > "$toml_file"
 }
 
+# Convert markdown command to Codex custom prompt format
+# Input: plain markdown or markdown with YAML frontmatter
+# Output: markdown with required YAML frontmatter (description, argument-hint)
+convert_md_to_codex_prompt() {
+  local md_file="$1"
+  local prompt_file="$2"
+
+  # Check if file already has YAML frontmatter
+  local has_frontmatter
+  has_frontmatter=$(head -1 "$md_file" | grep -c '^---$' || true)
+
+  local description=""
+  local body=""
+
+  if [ "$has_frontmatter" -eq 1 ]; then
+    # Extract existing description
+    description=$(awk '
+      /^---$/ { if (in_front) exit; in_front=1; next }
+      in_front && /^description:/ {
+        sub(/^description:[[:space:]]*/, "")
+        gsub(/^["'\'']|["'\'']$/, "")
+        print
+        exit
+      }
+    ' "$md_file")
+
+    # Get body (everything after second ---)
+    body=$(awk '
+      /^---$/ { count++; if (count == 2) { getbody=1; next } }
+      getbody { print }
+    ' "$md_file")
+  else
+    # No frontmatter - use filename as basis for description
+    local basename
+    basename=$(basename "$md_file" .md)
+    description=$(echo "$basename" | tr '-' ' ' | sed 's/\b\(.\)/\u\1/g')
+    body=$(cat "$md_file")
+  fi
+
+  # If still no description, extract from first line of body
+  if [ -z "$description" ]; then
+    description=$(echo "$body" | head -1 | sed 's/^#* *//' | cut -c1-80)
+  fi
+
+  # Detect if command uses arguments (look for placeholders like $1, $FILE, etc.)
+  local argument_hint=""
+  if echo "$body" | grep -qE '\$[0-9]|\$[A-Z_]+'; then
+    # Extract named placeholders
+    local placeholders
+    placeholders=$(echo "$body" | grep -oE '\$[A-Z_]+' | sort -u | tr '\n' ' ')
+    if [ -n "$placeholders" ]; then
+      argument_hint=$(echo "$placeholders" | sed 's/\$\([A-Z_]*\)/\1=<value>/g' | tr -s ' ')
+    fi
+  fi
+
+  # Write Codex prompt file with frontmatter
+  {
+    echo "---"
+    echo "description: $description"
+    if [ -n "$argument_hint" ]; then
+      echo "argument-hint: $argument_hint"
+    fi
+    echo "---"
+    echo ""
+    echo "$body"
+  } > "$prompt_file"
+}
+
+# Convert markdown command to Windsurf workflow format
+# Input: plain markdown or markdown with YAML frontmatter
+# Output: markdown structured as workflow (title, description, numbered steps)
+convert_md_to_windsurf_workflow() {
+  local md_file="$1"
+  local workflow_file="$2"
+
+  # Check if file already has YAML frontmatter
+  local has_frontmatter
+  has_frontmatter=$(head -1 "$md_file" | grep -c '^---$' || true)
+
+  local name=""
+  local description=""
+  local body=""
+
+  if [ "$has_frontmatter" -eq 1 ]; then
+    # Extract name from frontmatter
+    name=$(awk '
+      /^---$/ { if (in_front) exit; in_front=1; next }
+      in_front && /^name:/ {
+        sub(/^name:[[:space:]]*/, "")
+        gsub(/^["'\'']|["'\'']$/, "")
+        print
+        exit
+      }
+    ' "$md_file")
+
+    # Extract description from frontmatter
+    description=$(awk '
+      /^---$/ { if (in_front) exit; in_front=1; next }
+      in_front && /^description:/ {
+        sub(/^description:[[:space:]]*/, "")
+        gsub(/^["'\'']|["'\'']$/, "")
+        print
+        exit
+      }
+    ' "$md_file")
+
+    # Get body (everything after second ---)
+    body=$(awk '
+      /^---$/ { count++; if (count == 2) { getbody=1; next } }
+      getbody { print }
+    ' "$md_file")
+  else
+    # No frontmatter - derive from filename
+    local basename
+    basename=$(basename "$md_file" .md)
+    name=$(echo "$basename" | tr '-' ' ' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2))}1')
+    body=$(cat "$md_file")
+  fi
+
+  # If still no name, extract from first heading
+  if [ -z "$name" ]; then
+    name=$(echo "$body" | grep -m1 '^#' | sed 's/^#* *//')
+  fi
+
+  # If still no description, use first non-heading line
+  if [ -z "$description" ]; then
+    description=$(echo "$body" | grep -v '^#' | grep -v '^$' | head -1 | cut -c1-100)
+  fi
+
+  # Check content length (Windsurf has 12000 char limit)
+  local content_length
+  content_length=$(echo "$body" | wc -c)
+  if [ "$content_length" -gt 11500 ]; then
+    print_info "Warning: $md_file exceeds Windsurf 12k char limit, truncating"
+    body=$(echo "$body" | head -c 11500)
+    body="$body"$'\n\n'"[Content truncated - see original skill for full instructions]"
+  fi
+
+  # Check if body already has numbered steps structure
+  local has_steps
+  has_steps=$(echo "$body" | grep -cE '^[0-9]+\.' || true)
+
+  # Write Windsurf workflow file
+  {
+    echo "# $name"
+    echo ""
+    if [ -n "$description" ]; then
+      echo "$description"
+      echo ""
+    fi
+
+    if [ "$has_steps" -gt 0 ]; then
+      # Already has numbered steps, use as-is
+      echo "$body"
+    else
+      # Wrap content as workflow instructions
+      echo "## Instructions"
+      echo ""
+      echo "$body"
+    fi
+  } > "$workflow_file"
+}
+
 # ============================================================================
 # Agent Detection
 # ============================================================================
@@ -189,6 +373,10 @@ detect_agent() {
     echo "goose"
   elif [ -d ".factory" ]; then
     echo "factory"
+  elif [ -d ".codex" ]; then
+    echo "codex"
+  elif [ -d ".windsurf" ]; then
+    echo "windsurf"
   else
     echo ""
   fi
@@ -200,17 +388,19 @@ ask_agent() {
 
   echo "Which AI coding agent are you using?"
   echo ""
-  echo "  ┌─────────────┬──────────────────┐"
-  echo "  │ Agent       │ Directory        │"
-  echo "  ├─────────────┼──────────────────┤"
-  echo "  │ 1) Gemini   │ .gemini/skills   │"
-  echo "  │ 2) Copilot  │ .github/skills   │"
-  echo "  │ 3) Cursor   │ .cursor/skills   │"
-  echo "  │ 4) OpenCode │ .opencode/skill  │"
-  echo "  │ 5) Amp      │ .amp/skills      │"
-  echo "  │ 6) Goose    │ .goose/skills    │"
-  echo "  │ 7) Factory  │ .factory/skills  │"
-  echo "  └─────────────┴──────────────────┘"
+  echo "  ┌─────────────┬────────────────────┐"
+  echo "  │ Agent       │ Directory          │"
+  echo "  ├─────────────┼────────────────────┤"
+  echo "  │ 1) Gemini   │ .gemini/skills     │"
+  echo "  │ 2) Copilot  │ .github/skills     │"
+  echo "  │ 3) Cursor   │ .cursor/skills     │"
+  echo "  │ 4) OpenCode │ .opencode/skill    │"
+  echo "  │ 5) Amp      │ .amp/skills        │"
+  echo "  │ 6) Goose    │ .goose/skills      │"
+  echo "  │ 7) Factory  │ .factory/skills    │"
+  echo "  │ 8) Codex    │ .codex/skills      │"
+  echo "  │ 9) Windsurf │ .windsurf/skills   │"
+  echo "  └─────────────┴────────────────────┘"
   echo ""
 
   if [ -n "$detected" ]; then
@@ -218,7 +408,7 @@ ask_agent() {
     echo ""
   fi
 
-  printf "Select agent [1-7]: "
+  printf "Select agent [1-9]: "
   read choice
 
   case "$choice" in
@@ -229,6 +419,8 @@ ask_agent() {
     5) echo "amp" ;;
     6) echo "goose" ;;
     7) echo "factory" ;;
+    8) echo "codex" ;;
+    9) echo "windsurf" ;;
     *)
       print_error "Invalid choice"
       exit 1
@@ -286,23 +478,54 @@ install_project() {
     print_info "No skills directory in $project_name ($sparse_path/skills)"
   fi
 
-  if [ -n "$commands_dir" ] && [ -d "$source_commands" ]; then
+  if [ -d "$source_commands" ]; then
     print_info "Installing commands from $project_name..."
 
-    if [ "$agent" = "gemini" ]; then
-      # Convert .md to .toml for Gemini CLI
-      for md_file in "$source_commands"/*.md; do
-        [ -f "$md_file" ] || continue
-        local basename
-        basename=$(basename "$md_file" .md)
-        convert_md_to_toml "$md_file" "$commands_dir/$basename.toml"
-      done
-      print_success "Converted and installed $project_name commands (TOML)"
-    else
-      # Direct copy for other agents
-      cp -r "$source_commands/"* "$commands_dir/"
-      print_success "Installed $project_name commands"
-    fi
+    case "$agent" in
+      gemini)
+        # Convert .md to .toml for Gemini CLI
+        for md_file in "$source_commands"/*.md; do
+          [ -f "$md_file" ] || continue
+          local basename
+          basename=$(basename "$md_file" .md)
+          convert_md_to_toml "$md_file" "$commands_dir/$basename.toml"
+        done
+        print_success "Converted and installed $project_name commands (TOML)"
+        ;;
+
+      codex)
+        # Convert to Codex custom prompts (user-scoped ~/.codex/prompts/)
+        local prompts_dir
+        prompts_dir=$(get_prompts_dir "$agent")
+        mkdir -p "$prompts_dir"
+        for md_file in "$source_commands"/*.md; do
+          [ -f "$md_file" ] || continue
+          local basename
+          basename=$(basename "$md_file" .md)
+          convert_md_to_codex_prompt "$md_file" "$prompts_dir/$basename.md"
+        done
+        print_success "Converted and installed $project_name prompts → $prompts_dir/"
+        ;;
+
+      windsurf)
+        # Convert to Windsurf workflows
+        for md_file in "$source_commands"/*.md; do
+          [ -f "$md_file" ] || continue
+          local basename
+          basename=$(basename "$md_file" .md)
+          convert_md_to_windsurf_workflow "$md_file" "$commands_dir/$basename.md"
+        done
+        print_success "Converted and installed $project_name workflows"
+        ;;
+
+      *)
+        # Direct copy for agents with native command support
+        if [ -n "$commands_dir" ]; then
+          cp -r "$source_commands/"* "$commands_dir/"
+          print_success "Installed $project_name commands"
+        fi
+        ;;
+    esac
   fi
 }
 
@@ -380,13 +603,37 @@ do_install() {
   echo ""
   echo "  Locations:"
   echo "    • Skills:   $skills_dir/"
-  if supports_commands "$agent" && [ -d "$commands_dir" ] && [ "$(ls -A "$commands_dir" 2>/dev/null)" ]; then
-    echo "    • Commands: $commands_dir/"
-  fi
+
+  # Show commands/prompts/workflows location based on agent
+  case "$agent" in
+    codex)
+      local prompts_dir
+      prompts_dir=$(get_prompts_dir "$agent")
+      if [ -d "$prompts_dir" ] && [ "$(ls -A "$prompts_dir" 2>/dev/null)" ]; then
+        echo "    • Prompts:  $prompts_dir/ (converted from commands)"
+      fi
+      ;;
+    windsurf)
+      if [ -d "$commands_dir" ] && [ "$(ls -A "$commands_dir" 2>/dev/null)" ]; then
+        echo "    • Workflows: $commands_dir/ (converted from commands)"
+      fi
+      ;;
+    *)
+      if supports_commands "$agent" && [ -d "$commands_dir" ] && [ "$(ls -A "$commands_dir" 2>/dev/null)" ]; then
+        echo "    • Commands: $commands_dir/"
+      fi
+      ;;
+  esac
+
   echo ""
   echo "  Next steps:"
   echo "    1. Restart your AI coding agent to load the new skills"
   echo "    2. Skills are auto-discovered and activated when relevant"
+  if [ "$agent" = "codex" ]; then
+    echo "    3. Prompts are invoked via /prompts:<name> in Codex"
+  elif [ "$agent" = "windsurf" ]; then
+    echo "    3. Workflows are invoked via /<workflow-name> in Cascade"
+  fi
   echo ""
 }
 
@@ -512,17 +759,19 @@ show_help() {
   echo ""
   echo "Supported Agents:"
   echo ""
-  echo "  ┌─────────────┬──────────────────────┬──────────────────────┐"
-  echo "  │ Agent       │ Skills               │ Commands             │"
-  echo "  ├─────────────┼──────────────────────┼──────────────────────┤"
-  echo "  │ gemini      │ .gemini/skills       │ .gemini/commands     │"
-  echo "  │ copilot     │ .github/skills       │ -                    │"
-  echo "  │ cursor      │ .cursor/skills       │ .cursor/commands     │"
-  echo "  │ opencode    │ .opencode/skill      │ .opencode/command    │"
-  echo "  │ amp         │ .amp/skills          │ .amp/commands        │"
-  echo "  │ goose       │ .goose/skills        │ -                    │"
-  echo "  │ factory     │ .factory/skills      │ .factory/commands    │"
-  echo "  └─────────────┴──────────────────────┴──────────────────────┘"
+  echo "  ┌─────────────┬──────────────────────┬────────────────────────────┐"
+  echo "  │ Agent       │ Skills               │ Commands                   │"
+  echo "  ├─────────────┼──────────────────────┼────────────────────────────┤"
+  echo "  │ gemini      │ .gemini/skills       │ .gemini/commands (→TOML)   │"
+  echo "  │ copilot     │ .github/skills       │ -                          │"
+  echo "  │ cursor      │ .cursor/skills       │ .cursor/commands           │"
+  echo "  │ opencode    │ .opencode/skill      │ .opencode/command          │"
+  echo "  │ amp         │ .amp/skills          │ .amp/commands              │"
+  echo "  │ goose       │ .goose/skills        │ -                          │"
+  echo "  │ factory     │ .factory/skills      │ .factory/commands          │"
+  echo "  │ codex       │ .codex/skills        │ ~/.codex/prompts (→prompt) │"
+  echo "  │ windsurf    │ .windsurf/skills     │ .windsurf/workflows        │"
+  echo "  └─────────────┴──────────────────────┴────────────────────────────┘"
   echo ""
   echo "Examples:"
   echo "  ./install.sh                              # Interactive mode"
@@ -598,7 +847,7 @@ main() {
       skills_dir=$(get_skills_dir "$agent")
       if [ -z "$skills_dir" ]; then
         print_error "Unknown agent: $agent"
-        print_info "Valid agents: gemini, copilot, cursor, opencode, amp, goose, factory"
+        print_info "Valid agents: gemini, copilot, cursor, opencode, amp, goose, factory, codex, windsurf"
         exit 1
       fi
 

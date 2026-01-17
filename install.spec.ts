@@ -43,6 +43,8 @@ get_skills_dir() {
     amp)      echo ".amp/skills" ;;
     goose)    echo ".goose/skills" ;;
     factory)  echo ".factory/skills" ;;
+    codex)    echo ".codex/skills" ;;
+    windsurf) echo ".windsurf/skills" ;;
     *)        echo "" ;;
   esac
 }
@@ -56,13 +58,30 @@ get_commands_dir() {
     amp)      echo ".amp/commands" ;;
     goose)    echo ".goose/commands" ;;
     factory)  echo ".factory/commands" ;;
+    codex)    echo "" ;;
+    windsurf) echo ".windsurf/workflows" ;;
     *)        echo "" ;;
+  esac
+}
+
+get_prompts_dir() {
+  case "$1" in
+    codex) echo "$HOME/.codex/prompts" ;;
+    *)     echo "" ;;
   esac
 }
 
 supports_commands() {
   case "$1" in
     gemini|cursor|opencode|amp|factory) return 0 ;;
+    codex|windsurf) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+needs_command_conversion() {
+  case "$1" in
+    gemini|codex|windsurf) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -112,6 +131,14 @@ async function callFunctionExitCode(
 supports_commands() {
   case "$1" in
     gemini|cursor|opencode|amp|factory) return 0 ;;
+    codex|windsurf) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+needs_command_conversion() {
+  case "$1" in
+    gemini|codex|windsurf) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -182,6 +209,8 @@ describe("install.sh - get_skills_dir", () => {
     amp: ".amp/skills",
     goose: ".goose/skills",
     factory: ".factory/skills",
+    codex: ".codex/skills",
+    windsurf: ".windsurf/skills",
   };
 
   for (const [agent, expectedDir] of Object.entries(expectedMappings)) {
@@ -206,6 +235,7 @@ describe("install.sh - get_commands_dir", () => {
     amp: ".amp/commands",
     goose: ".goose/commands",
     factory: ".factory/commands",
+    windsurf: ".windsurf/workflows", // Windsurf uses workflows
   };
 
   for (const [agent, expectedDir] of Object.entries(expectedMappings)) {
@@ -215,14 +245,42 @@ describe("install.sh - get_commands_dir", () => {
     });
   }
 
+  test("returns empty for codex (uses prompts_dir instead)", async () => {
+    const result = await callFunction("get_commands_dir", "codex");
+    expect(result).toBe("");
+  });
+
   test("returns empty for unknown agent", async () => {
     const result = await callFunction("get_commands_dir", "unknown");
     expect(result).toBe("");
   });
 });
 
+describe("install.sh - get_prompts_dir", () => {
+  test("returns ~/.codex/prompts for codex", async () => {
+    const result = await callFunction("get_prompts_dir", "codex");
+    expect(result).toContain(".codex/prompts");
+  });
+
+  test("returns empty for other agents", async () => {
+    const agents = ["gemini", "cursor", "windsurf", "copilot"];
+    for (const agent of agents) {
+      const result = await callFunction("get_prompts_dir", agent);
+      expect(result).toBe("");
+    }
+  });
+});
+
 describe("install.sh - supports_commands", () => {
-  const supportsCommands = ["gemini", "cursor", "opencode", "amp", "factory"];
+  const supportsCommands = [
+    "gemini",
+    "cursor",
+    "opencode",
+    "amp",
+    "factory",
+    "codex",
+    "windsurf",
+  ];
   const doesNotSupportCommands = ["copilot", "goose"];
 
   for (const agent of supportsCommands) {
@@ -235,6 +293,25 @@ describe("install.sh - supports_commands", () => {
   for (const agent of doesNotSupportCommands) {
     test(`${agent} does not support commands`, async () => {
       const exitCode = await callFunctionExitCode("supports_commands", agent);
+      expect(exitCode).toBe(1);
+    });
+  }
+});
+
+describe("install.sh - needs_command_conversion", () => {
+  const needsConversion = ["gemini", "codex", "windsurf"];
+  const noConversion = ["cursor", "opencode", "amp", "factory", "copilot", "goose"];
+
+  for (const agent of needsConversion) {
+    test(`${agent} needs command conversion`, async () => {
+      const exitCode = await callFunctionExitCode("needs_command_conversion", agent);
+      expect(exitCode).toBe(0);
+    });
+  }
+
+  for (const agent of noConversion) {
+    test(`${agent} does not need command conversion`, async () => {
+      const exitCode = await callFunctionExitCode("needs_command_conversion", agent);
       expect(exitCode).toBe(1);
     });
   }
@@ -361,13 +438,15 @@ describe("README.md consistency", () => {
 
   test("has correct agent directory mappings", () => {
     const mappings = [
-      ["gemini", ".gemini/skills/"],
-      ["copilot", ".github/skills/"],
-      ["cursor", ".cursor/skills/"],
-      ["opencode", ".opencode/skill/"],
-      ["amp", ".amp/skills/"],
-      ["goose", ".goose/skills/"],
-      ["factory", ".factory/skills/"],
+      ["gemini", ".gemini/skills"],
+      ["copilot", ".github/skills"],
+      ["cursor", ".cursor/skills"],
+      ["opencode", ".opencode/skill"],
+      ["amp", ".amp/skills"],
+      ["goose", ".goose/skills"],
+      ["factory", ".factory/skills"],
+      ["codex", ".codex/skills"],
+      ["windsurf", ".windsurf/skills"],
     ];
 
     for (const [agent, dir] of mappings) {
@@ -518,5 +597,201 @@ describe("install.sh - supports_commands updated", () => {
   test("gemini now supports commands", async () => {
     const exitCode = await callFunctionExitCode("supports_commands", "gemini");
     expect(exitCode).toBe(0);
+  });
+});
+
+describe("install.sh - convert_md_to_codex_prompt", () => {
+  const tmpDir = join(import.meta.dir, ".test-tmp-codex");
+
+  // Helper to run convert_md_to_codex_prompt
+  async function convertMdToCodexPrompt(mdContent: string): Promise<string> {
+    const { mkdir, writeFile, readFile, rm } = await import("fs/promises");
+    await mkdir(tmpDir, { recursive: true });
+
+    const mdPath = join(tmpDir, "test-command.md");
+    const promptPath = join(tmpDir, "test-command-prompt.md");
+    const scriptPath = join(tmpDir, "run-test.sh");
+
+    await writeFile(mdPath, mdContent);
+
+    // Create wrapper script that extracts and runs the function
+    const script = `#!/bin/bash
+set -e
+# Extract convert_md_to_codex_prompt function from install.sh
+eval "$(sed -n '/^convert_md_to_codex_prompt()/,/^}/p' '${INSTALL_SCRIPT}')"
+convert_md_to_codex_prompt '${mdPath}' '${promptPath}'
+`;
+    await writeFile(scriptPath, script);
+    await $`bash ${scriptPath}`.quiet();
+
+    const output = await readFile(promptPath, "utf-8");
+    await rm(tmpDir, { recursive: true, force: true });
+    return output;
+  }
+
+  test("converts markdown with frontmatter to codex prompt", async () => {
+    const md = `---
+description: Review code for issues
+---
+
+Review the provided code for bugs and security issues.
+`;
+
+    const prompt = await convertMdToCodexPrompt(md);
+    expect(prompt).toContain("---");
+    expect(prompt).toContain("description: Review code for issues");
+    expect(prompt).toContain("Review the provided code");
+  });
+
+  test("extracts description from body when not in frontmatter", async () => {
+    const md = `---
+allowed-tools: Bash
+---
+
+# Code Review Helper
+
+Review the code.
+`;
+
+    const prompt = await convertMdToCodexPrompt(md);
+    expect(prompt).toContain("description:");
+    expect(prompt).toContain("Code Review Helper");
+  });
+
+  test("detects placeholders and creates argument-hint", async () => {
+    const md = `---
+description: Process files
+---
+
+Process $FILE with options $OPTIONS.
+`;
+
+    const prompt = await convertMdToCodexPrompt(md);
+    expect(prompt).toContain("argument-hint:");
+    expect(prompt).toMatch(/FILE=<value>/);
+    expect(prompt).toMatch(/OPTIONS=<value>/);
+  });
+
+  test("handles plain markdown without frontmatter", async () => {
+    const md = `# Simple Command
+
+Just do the thing.
+`;
+
+    const prompt = await convertMdToCodexPrompt(md);
+    expect(prompt).toContain("---");
+    expect(prompt).toContain("description:");
+    expect(prompt).toContain("Just do the thing");
+  });
+});
+
+describe("install.sh - convert_md_to_windsurf_workflow", () => {
+  const tmpDir = join(import.meta.dir, ".test-tmp-windsurf");
+
+  // Helper to run convert_md_to_windsurf_workflow
+  async function convertMdToWindsurfWorkflow(mdContent: string): Promise<string> {
+    const { mkdir, writeFile, readFile, rm } = await import("fs/promises");
+    await mkdir(tmpDir, { recursive: true });
+
+    const mdPath = join(tmpDir, "test-command.md");
+    const workflowPath = join(tmpDir, "test-workflow.md");
+    const scriptPath = join(tmpDir, "run-test.sh");
+
+    await writeFile(mdPath, mdContent);
+
+    // Create wrapper script that extracts and runs the function
+    const script = `#!/bin/bash
+set -e
+# Define print_info stub
+print_info() { echo "→ $1"; }
+# Extract convert_md_to_windsurf_workflow function from install.sh
+eval "$(sed -n '/^convert_md_to_windsurf_workflow()/,/^}/p' '${INSTALL_SCRIPT}')"
+convert_md_to_windsurf_workflow '${mdPath}' '${workflowPath}'
+`;
+    await writeFile(scriptPath, script);
+    await $`bash ${scriptPath}`.quiet();
+
+    const result = await readFile(workflowPath, "utf-8");
+    await rm(tmpDir, { recursive: true, force: true });
+    return result;
+  }
+
+  test("converts markdown with frontmatter to workflow", async () => {
+    const md = `---
+name: Code Review
+description: Review code for issues
+---
+
+1. Check for bugs
+2. Check for security issues
+3. Report findings
+`;
+
+    const workflow = await convertMdToWindsurfWorkflow(md);
+    expect(workflow).toContain("# Code Review");
+    expect(workflow).toContain("Review code for issues");
+    expect(workflow).toContain("1. Check for bugs");
+  });
+
+  test("extracts name from heading when not in frontmatter", async () => {
+    const md = `---
+description: A helpful workflow
+---
+
+# My Custom Workflow
+
+Do the thing.
+`;
+
+    const workflow = await convertMdToWindsurfWorkflow(md);
+    expect(workflow).toContain("# My Custom Workflow");
+    expect(workflow).toContain("A helpful workflow");
+  });
+
+  test("wraps content in Instructions section when no numbered steps", async () => {
+    const md = `---
+name: Simple Task
+description: Do something simple
+---
+
+Just follow these instructions to complete the task.
+Make sure to be careful.
+`;
+
+    const workflow = await convertMdToWindsurfWorkflow(md);
+    expect(workflow).toContain("# Simple Task");
+    expect(workflow).toContain("## Instructions");
+    expect(workflow).toContain("Just follow these instructions");
+  });
+
+  test("preserves numbered steps without wrapping", async () => {
+    const md = `---
+name: Numbered Steps
+description: Steps workflow
+---
+
+1. First step
+2. Second step
+3. Third step
+`;
+
+    const workflow = await convertMdToWindsurfWorkflow(md);
+    expect(workflow).toContain("1. First step");
+    expect(workflow).not.toContain("## Instructions");
+  });
+
+  test("handles plain markdown without frontmatter", async () => {
+    const md = `# Deploy Script
+
+Deploy the application to staging.
+
+1. Build the app
+2. Run tests
+3. Deploy to staging
+`;
+
+    const workflow = await convertMdToWindsurfWorkflow(md);
+    expect(workflow).toContain("# Deploy Script");
+    expect(workflow).toContain("1. Build the app");
   });
 });
