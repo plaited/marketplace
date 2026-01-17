@@ -1178,3 +1178,142 @@ fi
     });
   });
 });
+
+describe("install.sh - skill installation integration", () => {
+  const tmpDir = join(import.meta.dir, ".test-tmp-install");
+
+  // Integration test that simulates the actual install_project skill copying behavior
+  async function testSkillInstallation(
+    sourceSkills: string[],  // skill folder names in source
+    repo: string             // repo path like "plaited/acp-harness"
+  ): Promise<string[]> {
+    const { mkdir, rm, readdir } = await import("fs/promises");
+
+    // Setup directories
+    const sourceDir = join(tmpDir, "source-skills");
+    const destDir = join(tmpDir, "dest-skills");
+    await mkdir(sourceDir, { recursive: true });
+    await mkdir(destDir, { recursive: true });
+
+    // Create source skill folders
+    for (const skill of sourceSkills) {
+      await mkdir(join(sourceDir, skill), { recursive: true });
+    }
+
+    // Run the skill installation logic (extracted from install.sh)
+    const script = `
+is_scoped_skill() {
+  local skill_name="$1"
+  [[ "$skill_name" =~ ^.+@[a-zA-Z0-9._-]+_[a-zA-Z0-9._-]+$ ]]
+}
+
+extract_org_from_repo() {
+  local repo="$1"
+  echo "\${repo%%/*}"
+}
+
+get_scoped_skill_name() {
+  local skill_name="$1"
+  local repo="$2"
+  local org project_name
+  org=$(extract_org_from_repo "$repo")
+  project_name="\${repo##*/}"
+  echo "\${skill_name}@\${org}_\${project_name}"
+}
+
+source_skills="${sourceDir}"
+skills_dir="${destDir}"
+repo="${repo}"
+
+for skill_folder in "$source_skills"/*; do
+  [ -d "$skill_folder" ] || continue
+
+  skill_name=$(basename "$skill_folder")
+
+  if is_scoped_skill "$skill_name"; then
+    # Already scoped - copy as-is (inherited skill)
+    cp -r "$skill_folder" "$skills_dir/"
+  else
+    # Not scoped - rename with scope
+    scoped_name=$(get_scoped_skill_name "$skill_name" "$repo")
+    cp -r "$skill_folder" "$skills_dir/$scoped_name"
+  fi
+done
+`;
+
+    await $`bash -c ${script}`.quiet();
+
+    // Get resulting skill folder names
+    const installed = await readdir(destDir);
+    await rm(tmpDir, { recursive: true, force: true });
+
+    return installed.sort();
+  }
+
+  test("installs both inherited scoped skills and own skills with correct names", async () => {
+    // Simulating acp-harness with:
+    // - inherited: code-documentation@plaited_development-skills
+    // - inherited: typescript-lsp@plaited_development-skills
+    // - own skill: harness-skill (should become harness-skill@plaited_acp-harness)
+    const sourceSkills = [
+      "code-documentation@plaited_development-skills",
+      "typescript-lsp@plaited_development-skills",
+      "harness-skill"
+    ];
+
+    const installed = await testSkillInstallation(sourceSkills, "plaited/acp-harness");
+
+    expect(installed).toEqual([
+      "code-documentation@plaited_development-skills",  // preserved
+      "harness-skill@plaited_acp-harness",              // scoped
+      "typescript-lsp@plaited_development-skills"       // preserved
+    ]);
+  });
+
+  test("installs all skills from a project with no inherited skills", async () => {
+    const sourceSkills = [
+      "skill-a",
+      "skill-b",
+      "skill-c"
+    ];
+
+    const installed = await testSkillInstallation(sourceSkills, "plaited/development-skills");
+
+    expect(installed).toEqual([
+      "skill-a@plaited_development-skills",
+      "skill-b@plaited_development-skills",
+      "skill-c@plaited_development-skills"
+    ]);
+  });
+
+  test("installs only inherited skills when project has no own skills", async () => {
+    const sourceSkills = [
+      "inherited-a@org_project-a",
+      "inherited-b@org_project-b"
+    ];
+
+    const installed = await testSkillInstallation(sourceSkills, "plaited/consumer-project");
+
+    expect(installed).toEqual([
+      "inherited-a@org_project-a",
+      "inherited-b@org_project-b"
+    ]);
+  });
+
+  test("handles mixed inheritance from multiple sources", async () => {
+    // Project inherits from two different sources and has own skill
+    const sourceSkills = [
+      "skill-from-dev@plaited_development-skills",
+      "skill-from-tools@acme_shared-tools",
+      "my-own-skill"
+    ];
+
+    const installed = await testSkillInstallation(sourceSkills, "plaited/my-project");
+
+    expect(installed).toEqual([
+      "my-own-skill@plaited_my-project",
+      "skill-from-dev@plaited_development-skills",
+      "skill-from-tools@acme_shared-tools"
+    ]);
+  });
+});
