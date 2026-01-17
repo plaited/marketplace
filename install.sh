@@ -299,6 +299,50 @@ remove_scoped_commands() {
   esac
 }
 
+# Remove all scoped skills and commands for a project
+# Used by both update and uninstall operations
+# Echoes the count of removed skills to stdout
+remove_project_scoped_content() {
+  local agent="$1"
+  local project_name="$2"
+  local skills_dir="$3"
+  local commands_dir="$4"
+  local removed=0
+
+  local repo
+  repo=$(get_project_repo "$project_name")
+  if [ -z "$repo" ]; then
+    print_warning "Could not find repository for project: $project_name, skipping removal"
+    echo "0"
+    return 0
+  fi
+
+  local org project_suffix scope_pattern scope
+  org=$(extract_org_from_repo "$repo")
+  project_suffix="${repo##*/}"
+  scope_pattern="@${org}_${project_suffix}$"
+  scope="${org}_${project_suffix}"
+
+  # Remove scoped skills
+  for skill_folder in "$skills_dir"/*; do
+    [ -d "$skill_folder" ] || continue
+    local skill_name
+    skill_name=$(basename "$skill_folder")
+    if [[ "$skill_name" =~ $scope_pattern ]]; then
+      rm -rf "$skill_folder"
+      print_info "Removed skill: $skill_name"
+      removed=$((removed + 1))
+    fi
+  done
+
+  # Remove scoped commands
+  if [ -n "$commands_dir" ]; then
+    remove_scoped_commands "$agent" "$scope" "$commands_dir"
+  fi
+
+  echo "$removed"
+}
+
 # ============================================================================
 # Format Conversion
 # ============================================================================
@@ -673,11 +717,16 @@ install_project() {
   local source_skills="$project_temp/$sparse_path/skills"
   local source_commands="$project_temp/$sparse_path/commands"
 
+  # Get repo once for both skills and commands scoping
+  local repo
+  repo=$(get_project_repo "$project_name")
+  if [ -z "$repo" ]; then
+    print_error "Could not find repository for project: $project_name"
+    return 1
+  fi
+
   if [ -d "$source_skills" ]; then
     print_info "Installing skills from $project_name..."
-
-    local repo
-    repo=$(get_project_repo "$project_name")
 
     for skill_folder in "$source_skills"/*; do
       [ -d "$skill_folder" ] || continue
@@ -706,8 +755,6 @@ install_project() {
   if [ -d "$source_commands" ]; then
     print_info "Installing commands from $project_name..."
 
-    local repo
-    repo=$(get_project_repo "$project_name")
     local scope
     scope=$(get_command_scope_prefix "$repo")
 
@@ -993,30 +1040,7 @@ do_update() {
     if [ -n "$specific_project" ] && [ "$project_name" != "$specific_project" ]; then
       continue
     fi
-
-    # Remove all skills matching this project's scope pattern
-    local repo
-    repo=$(get_project_repo "$project_name")
-    local org project_suffix scope_pattern scope
-    org=$(extract_org_from_repo "$repo")
-    project_suffix="${repo##*/}"
-    scope_pattern="@${org}_${project_suffix}$"
-    scope="${org}_${project_suffix}"
-
-    for skill_folder in "$skills_dir"/*; do
-      [ -d "$skill_folder" ] || continue
-      local skill_name
-      skill_name=$(basename "$skill_folder")
-      if [[ "$skill_name" =~ $scope_pattern ]]; then
-        rm -rf "$skill_folder"
-        print_info "Removed skill: $skill_name"
-      fi
-    done
-
-    # Remove scoped commands
-    if [ -n "$commands_dir" ]; then
-      remove_scoped_commands "$agent" "$scope" "$commands_dir"
-    fi
+    remove_project_scoped_content "$agent" "$project_name" "$skills_dir" "$commands_dir"
   done
 
   # Reinstall
@@ -1067,31 +1091,9 @@ do_uninstall() {
     if [ -n "$specific_project" ] && [ "$project_name" != "$specific_project" ]; then
       continue
     fi
-
-    # Remove all skills matching this project's scope pattern
-    local repo
-    repo=$(get_project_repo "$project_name")
-    local org project_suffix scope_pattern scope
-    org=$(extract_org_from_repo "$repo")
-    project_suffix="${repo##*/}"
-    scope_pattern="@${org}_${project_suffix}$"
-    scope="${org}_${project_suffix}"
-
-    for skill_folder in "$skills_dir"/*; do
-      [ -d "$skill_folder" ] || continue
-      local skill_name
-      skill_name=$(basename "$skill_folder")
-      if [[ "$skill_name" =~ $scope_pattern ]]; then
-        rm -rf "$skill_folder"
-        print_success "Removed skill: $skill_name"
-        removed=$((removed + 1))
-      fi
-    done
-
-    # Remove scoped commands
-    if [ -n "$commands_dir" ]; then
-      remove_scoped_commands "$agent" "$scope" "$commands_dir"
-    fi
+    local count
+    count=$(remove_project_scoped_content "$agent" "$project_name" "$skills_dir" "$commands_dir")
+    removed=$((removed + count))
   done
 
   if [ "$removed" -eq 0 ]; then

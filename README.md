@@ -53,6 +53,25 @@ cd skills-installer
 | **acp-harness** | [plaited/acp-harness](https://github.com/plaited/acp-harness) |
 | **plaited** | [plaited/plaited](https://github.com/plaited/plaited) |
 
+## Skill Scoping
+
+Skills are automatically scoped during installation to prevent naming collisions when multiple projects provide skills with the same name.
+
+**Skill folders** are renamed using the pattern: `<skill-name>@<org>_<project>`
+
+Example: `typescript-lsp` from `plaited/development-skills` becomes `typescript-lsp@plaited_development-skills`
+
+**Commands** are scoped per agent type:
+
+| Agent | Command Scoping |
+|-------|-----------------|
+| gemini | `org_project:command.toml` |
+| claude, opencode | `org_project/command.md` (folder) |
+| cursor, factory, amp, windsurf | `org_project--command.md` |
+| codex | No scoping (user-level prompts) |
+
+**Inherited skills** (already scoped from another project) preserve their original scope to prevent double-scoping.
+
 ## Project Details
 
 ### development-skills
