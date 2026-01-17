@@ -224,10 +224,26 @@ is_scoped_skill() {
   [[ "$skill_name" =~ ^.+@[a-zA-Z0-9._-]+_[a-zA-Z0-9._-]+$ ]]
 }
 
+# Validate scope component doesn't contain path traversal sequences
+validate_scope_component() {
+  local component="$1"
+  # Reject empty, path traversal, or absolute paths
+  if [ -z "$component" ] || [[ "$component" =~ \.\. ]] || [[ "$component" =~ ^/ ]]; then
+    return 1
+  fi
+  return 0
+}
+
 # Extract org from repo path (e.g., "plaited" from "plaited/development-skills")
 extract_org_from_repo() {
   local repo="$1"
-  echo "${repo%%/*}"
+  local org="${repo%%/*}"
+  # Validate extracted org
+  if ! validate_scope_component "$org"; then
+    echo ""
+    return 1
+  fi
+  echo "$org"
 }
 
 # Generate scoped skill name: skill-name@org_project
@@ -237,6 +253,11 @@ get_scoped_skill_name() {
   local org project_name
   org=$(extract_org_from_repo "$repo")
   project_name="${repo##*/}"
+  # Validate components
+  if ! validate_scope_component "$org" || ! validate_scope_component "$project_name"; then
+    echo "$skill_name"  # Return unscoped name on validation failure
+    return 1
+  fi
   echo "${skill_name}@${org}_${project_name}"
 }
 
@@ -246,7 +267,27 @@ get_command_scope_prefix() {
   local org project_name
   org=$(extract_org_from_repo "$repo")
   project_name="${repo##*/}"
+  # Validate components
+  if ! validate_scope_component "$org" || ! validate_scope_component "$project_name"; then
+    echo ""
+    return 1
+  fi
   echo "${org}_${project_name}"
+}
+
+# Helper to safely remove files matching a glob pattern
+# Uses nullglob to handle no-match case properly
+remove_matching_files() {
+  local pattern="$1"
+  local dir="$2"
+  (
+    shopt -s nullglob
+    for cmd_file in "$dir"/$pattern; do
+      [ -f "$cmd_file" ] || continue
+      rm -f "$cmd_file"
+      print_info "Removed command: $(basename "$cmd_file")"
+    done
+  )
 }
 
 # Remove scoped commands for a project based on agent type
@@ -260,11 +301,7 @@ remove_scoped_commands() {
   case "$agent" in
     gemini)
       # Remove scope:*.toml files
-      for cmd_file in "$commands_dir"/${scope}:*.toml; do
-        [ -f "$cmd_file" ] || continue
-        rm -f "$cmd_file"
-        print_info "Removed command: $(basename "$cmd_file")"
-      done
+      remove_matching_files "${scope}:*.toml" "$commands_dir"
       ;;
 
     claude|opencode)
@@ -277,11 +314,7 @@ remove_scoped_commands() {
 
     cursor|factory|amp|windsurf)
       # Remove scope--*.md files
-      for cmd_file in "$commands_dir"/${scope}--*.md; do
-        [ -f "$cmd_file" ] || continue
-        rm -f "$cmd_file"
-        print_info "Removed command: $(basename "$cmd_file")"
-      done
+      remove_matching_files "${scope}--*.md" "$commands_dir"
       ;;
 
     codex)
@@ -290,11 +323,7 @@ remove_scoped_commands() {
 
     *)
       # Fallback: remove scope--*.md files
-      for cmd_file in "$commands_dir"/${scope}--*.md; do
-        [ -f "$cmd_file" ] || continue
-        rm -f "$cmd_file"
-        print_info "Removed command: $(basename "$cmd_file")"
-      done
+      remove_matching_files "${scope}--*.md" "$commands_dir"
       ;;
   esac
 }
@@ -317,23 +346,24 @@ remove_project_scoped_content() {
     return 0
   fi
 
-  local org project_suffix scope_pattern scope
-  org=$(extract_org_from_repo "$repo")
-  project_suffix="${repo##*/}"
-  scope_pattern="@${org}_${project_suffix}$"
-  scope="${org}_${project_suffix}"
+  # Reuse get_command_scope_prefix for scope calculation
+  local scope scope_pattern
+  scope=$(get_command_scope_prefix "$repo")
+  scope_pattern="@${scope}$"
 
-  # Remove scoped skills
-  for skill_folder in "$skills_dir"/*; do
-    [ -d "$skill_folder" ] || continue
-    local skill_name
-    skill_name=$(basename "$skill_folder")
-    if [[ "$skill_name" =~ $scope_pattern ]]; then
-      rm -rf "$skill_folder"
-      print_info "Removed skill: $skill_name"
-      removed=$((removed + 1))
-    fi
-  done
+  # Remove scoped skills (only if directory exists)
+  if [ -d "$skills_dir" ]; then
+    for skill_folder in "$skills_dir"/*; do
+      [ -d "$skill_folder" ] || continue
+      local skill_name
+      skill_name=$(basename "$skill_folder")
+      if [[ "$skill_name" =~ $scope_pattern ]]; then
+        rm -rf "$skill_folder"
+        print_info "Removed skill: $skill_name"
+        removed=$((removed + 1))
+      fi
+    done
+  fi
 
   # Remove scoped commands
   if [ -n "$commands_dir" ]; then
