@@ -1574,3 +1574,217 @@ esac
     ]);
   });
 });
+
+describe("install.sh - scoped content removal integration", () => {
+  const tmpDir = join(import.meta.dir, ".test-tmp-removal");
+
+  // Integration test for remove_project_scoped_content behavior
+  async function testScopedSkillRemoval(
+    existingSkills: string[],  // skill folder names already installed
+    scopeToRemove: string      // scope pattern like "plaited_development-skills"
+  ): Promise<string[]> {
+    const { mkdir, rm, readdir } = await import("fs/promises");
+
+    const skillsDir = join(tmpDir, "skills");
+    await mkdir(skillsDir, { recursive: true });
+
+    // Create existing skill folders
+    for (const skill of existingSkills) {
+      await mkdir(join(skillsDir, skill), { recursive: true });
+    }
+
+    // Run the removal logic (extracted from install.sh)
+    const script = `
+shopt -s nullglob
+
+skills_dir="${skillsDir}"
+scope_pattern="@${scopeToRemove}$"
+
+for skill_folder in "$skills_dir"/*; do
+  [ -d "$skill_folder" ] || continue
+  skill_name=$(basename "$skill_folder")
+  if [[ "$skill_name" =~ $scope_pattern ]]; then
+    rm -rf "$skill_folder"
+  fi
+done
+`;
+
+    await $`bash -c ${script}`.quiet();
+
+    // Get remaining skill folder names
+    const remaining = await readdir(skillsDir);
+    await rm(tmpDir, { recursive: true, force: true });
+
+    return remaining.sort();
+  }
+
+  test("removes only skills matching the scope pattern", async () => {
+    const existing = [
+      "typescript-lsp@plaited_development-skills",
+      "code-documentation@plaited_development-skills",
+      "harness-skill@plaited_acp-harness",
+      "unscoped-skill"
+    ];
+
+    const remaining = await testScopedSkillRemoval(
+      existing,
+      "plaited_development-skills"
+    );
+
+    expect(remaining).toEqual([
+      "harness-skill@plaited_acp-harness",
+      "unscoped-skill"
+    ]);
+  });
+
+  test("preserves all skills when scope doesn't match", async () => {
+    const existing = [
+      "typescript-lsp@plaited_development-skills",
+      "harness-skill@plaited_acp-harness"
+    ];
+
+    const remaining = await testScopedSkillRemoval(
+      existing,
+      "other_project"
+    );
+
+    expect(remaining).toEqual([
+      "harness-skill@plaited_acp-harness",
+      "typescript-lsp@plaited_development-skills"
+    ]);
+  });
+
+  test("handles empty skills directory gracefully", async () => {
+    const remaining = await testScopedSkillRemoval([], "plaited_development-skills");
+    expect(remaining).toEqual([]);
+  });
+
+  // Integration test for scoped command removal
+  async function testScopedCommandRemoval(
+    existingCommands: string[],  // command file names
+    scopeToRemove: string,       // scope like "plaited_development-skills"
+    agent: string                // agent type
+  ): Promise<string[]> {
+    const { mkdir, rm, readdir, writeFile } = await import("fs/promises");
+
+    const commandsDir = join(tmpDir, "commands");
+    await mkdir(commandsDir, { recursive: true });
+
+    // Create existing command files
+    for (const cmd of existingCommands) {
+      if (cmd.includes("/")) {
+        // Folder-based command
+        const folder = cmd.split("/")[0];
+        await mkdir(join(commandsDir, folder), { recursive: true });
+        await writeFile(join(commandsDir, cmd), "test");
+      } else {
+        await writeFile(join(commandsDir, cmd), "test");
+      }
+    }
+
+    // Run the removal logic (extracted from install.sh)
+    const script = `
+shopt -s nullglob
+
+remove_matching_files() {
+  local pattern="$1"
+  local dir="$2"
+  for cmd_file in "$dir"/$pattern; do
+    [ -f "$cmd_file" ] || continue
+    rm -f "$cmd_file"
+  done
+}
+
+commands_dir="${commandsDir}"
+scope="${scopeToRemove}"
+agent="${agent}"
+
+case "$agent" in
+  gemini)
+    remove_matching_files "\${scope}:*.toml" "$commands_dir"
+    ;;
+  claude|opencode)
+    if [ -d "$commands_dir/$scope" ]; then
+      rm -rf "$commands_dir/$scope"
+    fi
+    ;;
+  cursor|factory|amp|windsurf)
+    remove_matching_files "\${scope}--*.md" "$commands_dir"
+    ;;
+esac
+`;
+
+    await $`bash -c ${script}`.quiet();
+
+    // Get remaining files (recursively for folder-based)
+    const remaining: string[] = [];
+    const entries = await readdir(commandsDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        const subEntries = await readdir(join(commandsDir, entry.name));
+        for (const sub of subEntries) {
+          remaining.push(`${entry.name}/${sub}`);
+        }
+      } else {
+        remaining.push(entry.name);
+      }
+    }
+    await rm(tmpDir, { recursive: true, force: true });
+
+    return remaining.sort();
+  }
+
+  test("removes gemini commands matching scope pattern", async () => {
+    const existing = [
+      "plaited_development-skills:commit.toml",
+      "plaited_development-skills:review.toml",
+      "plaited_acp-harness:test.toml"
+    ];
+
+    const remaining = await testScopedCommandRemoval(
+      existing,
+      "plaited_development-skills",
+      "gemini"
+    );
+
+    expect(remaining).toEqual([
+      "plaited_acp-harness:test.toml"
+    ]);
+  });
+
+  test("removes claude folder-based commands", async () => {
+    const existing = [
+      "plaited_development-skills/commit.md",
+      "plaited_development-skills/review.md",
+      "plaited_acp-harness/test.md"
+    ];
+
+    const remaining = await testScopedCommandRemoval(
+      existing,
+      "plaited_development-skills",
+      "claude"
+    );
+
+    expect(remaining).toEqual([
+      "plaited_acp-harness/test.md"
+    ]);
+  });
+
+  test("removes cursor prefix-based commands", async () => {
+    const existing = [
+      "plaited_development-skills--commit.md",
+      "plaited_development-skills--review.md",
+      "plaited_acp-harness--test.md"
+    ];
+
+    const remaining = await testScopedCommandRemoval(
+      existing,
+      "plaited_development-skills",
+      "cursor"
+    );
+
+    expect(remaining).toEqual([
+      "plaited_acp-harness--test.md"
+    ]);
+  });
+});

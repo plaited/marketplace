@@ -771,7 +771,10 @@ install_project() {
       else
         # Not scoped - rename with scope
         local scoped_name
-        scoped_name=$(get_scoped_skill_name "$skill_name" "$repo")
+        if ! scoped_name=$(get_scoped_skill_name "$skill_name" "$repo"); then
+          print_error "  Skipped: $skill_name (invalid scope components)"
+          continue
+        fi
         cp -r "$skill_folder" "$skills_dir/$scoped_name"
         print_info "  Installed: $scoped_name"
       fi
@@ -786,7 +789,10 @@ install_project() {
     print_info "Installing commands from $project_name..."
 
     local scope
-    scope=$(get_command_scope_prefix "$repo")
+    if ! scope=$(get_command_scope_prefix "$repo"); then
+      print_error "Skipping commands: invalid scope components in repo $repo"
+      return 1
+    fi
 
     # Skip if agent doesn't support commands
     if [ -z "$commands_dir" ]; then

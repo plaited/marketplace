@@ -72,6 +72,19 @@ Example: `typescript-lsp` from `plaited/development-skills` becomes `typescript-
 
 **Inherited skills** (already scoped from another project) preserve their original scope to prevent double-scoping.
 
+**Note:** Org and project names may contain alphanumeric characters, dots, hyphens, and underscores. Some tools using dot-notation for namespacing may interpret dots specially.
+
+### Upgrading from Unscoped Installations
+
+If you previously installed skills without scoping, run `--uninstall` first to remove unscoped skills, then reinstall:
+
+```bash
+./install.sh --uninstall --agent <agent-name>
+./install.sh --agent <agent-name>
+```
+
+This ensures a clean installation with properly scoped skill names.
+
 ## Project Details
 
 ### development-skills
