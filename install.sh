@@ -348,7 +348,11 @@ remove_project_scoped_content() {
 
   # Reuse get_command_scope_prefix for scope calculation
   local scope scope_pattern
-  scope=$(get_command_scope_prefix "$repo")
+  if ! scope=$(get_command_scope_prefix "$repo"); then
+    print_info "Could not generate scope for project: $project_name, skipping removal"
+    echo "0"
+    return 0
+  fi
   scope_pattern="@${scope}$"
 
   # Remove scoped skills (only if directory exists)
@@ -790,12 +794,9 @@ install_project() {
 
     local scope
     if ! scope=$(get_command_scope_prefix "$repo"); then
-      print_error "Skipping commands: invalid scope components in repo $repo"
-      return 1
-    fi
-
-    # Skip if agent doesn't support commands
-    if [ -z "$commands_dir" ]; then
+      print_error "  Skipping commands: invalid scope components"
+    elif [ -z "$commands_dir" ]; then
+      # Skip if agent doesn't support commands
       print_info "Agent $agent does not support commands, skipping..."
     else
       case "$agent" in
