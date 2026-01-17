@@ -312,7 +312,7 @@ remove_project_scoped_content() {
   local repo
   repo=$(get_project_repo "$project_name")
   if [ -z "$repo" ]; then
-    print_warning "Could not find repository for project: $project_name, skipping removal"
+    print_info "Could not find repository for project: $project_name, skipping removal"
     echo "0"
     return 0
   fi
