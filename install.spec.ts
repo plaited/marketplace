@@ -501,7 +501,7 @@ convert_md_to_toml() {
     getbody { print }
   ' "$md_file")
 
-  body=$(echo "$body" | sed 's/\\$ARGUMENTS/{{args}}/g')
+  body=$(printf '%s\\n' "$body" | sed 's/\\$ARGUMENTS/{{args}}/g')
 
   {
     if [ -n "$description" ]; then
@@ -617,6 +617,17 @@ describe("install.sh - convert_md_to_codex_prompt", () => {
     // Create wrapper script that extracts and runs the function
     const script = `#!/bin/bash
 set -e
+# Define print_error stub and safe_read_file helper
+print_error() { echo "✗ $1" >&2; }
+MAX_FILE_SIZE=102400
+safe_read_file() {
+  local file="$1"
+  local max_size="\${2:-$MAX_FILE_SIZE}"
+  if [ ! -f "$file" ]; then return 1; fi
+  local file_size; file_size=$(wc -c < "$file")
+  if [ "$file_size" -gt "$max_size" ]; then print_error "File exceeds size limit"; return 1; fi
+  cat "$file"
+}
 # Extract convert_md_to_codex_prompt function from install.sh
 eval "$(sed -n '/^convert_md_to_codex_prompt()/,/^}/p' '${INSTALL_SCRIPT}')"
 convert_md_to_codex_prompt '${mdPath}' '${promptPath}'
@@ -702,8 +713,18 @@ describe("install.sh - convert_md_to_windsurf_workflow", () => {
     // Create wrapper script that extracts and runs the function
     const script = `#!/bin/bash
 set -e
-# Define print_info stub
+# Define print_info, print_error stubs and safe_read_file helper
 print_info() { echo "→ $1"; }
+print_error() { echo "✗ $1" >&2; }
+MAX_FILE_SIZE=102400
+safe_read_file() {
+  local file="$1"
+  local max_size="\${2:-$MAX_FILE_SIZE}"
+  if [ ! -f "$file" ]; then return 1; fi
+  local file_size; file_size=$(wc -c < "$file")
+  if [ "$file_size" -gt "$max_size" ]; then print_error "File exceeds size limit"; return 1; fi
+  cat "$file"
+}
 # Extract convert_md_to_windsurf_workflow function from install.sh
 eval "$(sed -n '/^convert_md_to_windsurf_workflow()/,/^}/p' '${INSTALL_SCRIPT}')"
 convert_md_to_windsurf_workflow '${mdPath}' '${workflowPath}'

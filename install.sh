@@ -21,6 +21,29 @@ PROJECTS_JSON="$SCRIPT_DIR/projects.json"
 BRANCH="main"
 TEMP_DIR=""
 
+# Security: Maximum file size for reading (100KB) to prevent resource exhaustion
+MAX_FILE_SIZE=102400
+
+# Safely read file contents with size limit check
+safe_read_file() {
+  local file="$1"
+  local max_size="${2:-$MAX_FILE_SIZE}"
+
+  if [ ! -f "$file" ]; then
+    return 1
+  fi
+
+  local file_size
+  file_size=$(wc -c < "$file")
+
+  if [ "$file_size" -gt "$max_size" ]; then
+    print_error "File exceeds size limit ($max_size bytes): $file"
+    return 1
+  fi
+
+  cat "$file"
+}
+
 # ============================================================================
 # Agent Directory Mappings (functions for bash 3.x compatibility)
 # ============================================================================
@@ -244,7 +267,9 @@ convert_md_to_codex_prompt() {
     local basename
     basename=$(basename "$md_file" .md)
     description=$(echo "$basename" | tr '-' ' ' | sed 's/\b\(.\)/\u\1/g')
-    body=$(cat "$md_file")
+    if ! body=$(safe_read_file "$md_file"); then
+      return 1
+    fi
   fi
 
   # If still no description, extract from first line of body
@@ -324,7 +349,9 @@ convert_md_to_windsurf_workflow() {
     local basename
     basename=$(basename "$md_file" .md)
     name=$(echo "$basename" | tr '-' ' ' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2))}1')
-    body=$(cat "$md_file")
+    if ! body=$(safe_read_file "$md_file"); then
+      return 1
+    fi
   fi
 
   # If still no name, extract from first heading
@@ -376,27 +403,20 @@ convert_md_to_windsurf_workflow() {
 # ============================================================================
 
 detect_agent() {
-  if [ -d ".gemini" ]; then
-    echo "gemini"
-  elif [ -d ".github" ]; then
-    echo "copilot"
-  elif [ -d ".cursor" ]; then
-    echo "cursor"
-  elif [ -d ".opencode" ]; then
-    echo "opencode"
-  elif [ -d ".amp" ]; then
-    echo "amp"
-  elif [ -d ".goose" ]; then
-    echo "goose"
-  elif [ -d ".factory" ]; then
-    echo "factory"
-  elif [ -d ".codex" ]; then
-    echo "codex"
-  elif [ -d ".windsurf" ]; then
-    echo "windsurf"
-  else
-    echo ""
-  fi
+  # Agent detection: directory -> agent name mapping
+  # Using loop for maintainability (easier to add new agents)
+  local agents=".gemini:gemini .github:copilot .cursor:cursor .opencode:opencode .amp:amp .goose:goose .factory:factory .codex:codex .windsurf:windsurf"
+
+  for entry in $agents; do
+    local dir="${entry%%:*}"
+    local agent="${entry#*:}"
+    if [ -d "$dir" ]; then
+      echo "$agent"
+      return 0
+    fi
+  done
+
+  echo ""
 }
 
 ask_agent() {
@@ -850,11 +870,35 @@ main() {
   # Check projects.json exists, fetch from GitHub if not found (for curl | bash usage)
   if [ ! -f "$PROJECTS_JSON" ]; then
     PROJECTS_JSON=$(mktemp)
+    local checksum_file
+    checksum_file=$(mktemp)
+
+    # Fetch both projects.json and its checksum
     curl -fsSL "https://raw.githubusercontent.com/plaited/skills-installer/main/projects.json" -o "$PROJECTS_JSON" 2>/dev/null
+    curl -fsSL "https://raw.githubusercontent.com/plaited/skills-installer/main/projects.json.sha256" -o "$checksum_file" 2>/dev/null
+
     if [ ! -s "$PROJECTS_JSON" ]; then
       print_error "Could not fetch projects.json"
+      rm -f "$checksum_file"
       exit 1
     fi
+
+    # Verify checksum if available (security: prevent tampered downloads)
+    if [ -s "$checksum_file" ]; then
+      local expected_checksum actual_checksum
+      expected_checksum=$(awk '{print $1}' "$checksum_file")
+      actual_checksum=$(shasum -a 256 "$PROJECTS_JSON" 2>/dev/null | awk '{print $1}')
+
+      if [ "$expected_checksum" != "$actual_checksum" ]; then
+        print_error "Checksum verification failed for projects.json"
+        print_error "Expected: $expected_checksum"
+        print_error "Got: $actual_checksum"
+        rm -f "$checksum_file"
+        exit 1
+      fi
+      print_info "Checksum verified for projects.json"
+    fi
+    rm -f "$checksum_file"
   fi
 
   print_header
