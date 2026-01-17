@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "agent-skills-spec": {
+      "type": "http",
+      "url": "https://agentskills.io/mcp"
+    },
+    "bun-docs" : {
+      "type": "http",
+      "url": "https://bun.com/docs/mcp"
+    }
+  }
+}
