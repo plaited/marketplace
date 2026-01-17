@@ -53,11 +53,11 @@ get_skills_dir() {
 get_commands_dir() {
   case "$1" in
     gemini)   echo ".gemini/commands" ;;
-    copilot)  echo ".github/commands" ;;
+    copilot)  echo "" ;;
     cursor)   echo ".cursor/commands" ;;
     opencode) echo ".opencode/command" ;;
     amp)      echo ".amp/commands" ;;
-    goose)    echo ".goose/commands" ;;
+    goose)    echo "" ;;
     factory)  echo ".factory/commands" ;;
     codex)    echo "" ;;
     windsurf) echo ".windsurf/workflows" ;;
@@ -232,11 +232,9 @@ describe("install.sh - get_skills_dir", () => {
 describe("install.sh - get_commands_dir", () => {
   const expectedMappings: Record<string, string> = {
     gemini: ".gemini/commands",
-    copilot: ".github/commands",
     cursor: ".cursor/commands",
     opencode: ".opencode/command",
     amp: ".amp/commands",
-    goose: ".goose/commands",
     factory: ".factory/commands",
     windsurf: ".windsurf/workflows", // Windsurf uses workflows
     claude: ".claude/commands",
@@ -248,6 +246,16 @@ describe("install.sh - get_commands_dir", () => {
       expect(result).toBe(expectedDir);
     });
   }
+
+  test("returns empty for copilot (no command support)", async () => {
+    const result = await callFunction("get_commands_dir", "copilot");
+    expect(result).toBe("");
+  });
+
+  test("returns empty for goose (no command support)", async () => {
+    const result = await callFunction("get_commands_dir", "goose");
+    expect(result).toBe("");
+  });
 
   test("returns empty for codex (uses prompts_dir instead)", async () => {
     const result = await callFunction("get_commands_dir", "codex");

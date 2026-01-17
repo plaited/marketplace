@@ -88,11 +88,11 @@ get_skills_dir() {
 get_commands_dir() {
   case "$1" in
     gemini)   echo ".gemini/commands" ;;
-    copilot)  echo ".github/commands" ;;
+    copilot)  echo "" ;;                   # Copilot doesn't support commands
     cursor)   echo ".cursor/commands" ;;
     opencode) echo ".opencode/command" ;;  # OpenCode uses 'command' (singular)
     amp)      echo ".amp/commands" ;;
-    goose)    echo ".goose/commands" ;;
+    goose)    echo "" ;;                   # Goose doesn't support commands
     factory)  echo ".factory/commands" ;;
     codex)    echo "" ;;                   # Codex uses ~/.codex/prompts/ (user-scoped)
     windsurf) echo ".windsurf/workflows" ;; # Windsurf uses workflows, not commands
@@ -711,64 +711,85 @@ install_project() {
     local scope
     scope=$(get_command_scope_prefix "$repo")
 
-    case "$agent" in
-      gemini)
-        # Convert .md to .toml for Gemini CLI (scope:command.toml)
-        for md_file in "$source_commands"/*.md; do
-          [ -f "$md_file" ] || continue
-          local cmd_name
-          cmd_name=$(basename "$md_file" .md)
-          local scoped_name="${scope}:${cmd_name}"
-          convert_md_to_toml "$md_file" "$commands_dir/$scoped_name.toml"
-          print_info "  Installed: /$scoped_name"
-        done
-        print_success "Converted and installed $project_name commands (TOML)"
-        ;;
+    # Skip if agent doesn't support commands
+    if [ -z "$commands_dir" ]; then
+      print_info "Agent $agent does not support commands, skipping..."
+    else
+      case "$agent" in
+        gemini)
+          # Convert .md to .toml for Gemini CLI (scope:command.toml)
+          mkdir -p "$commands_dir"
+          for md_file in "$source_commands"/*.md; do
+            [ -f "$md_file" ] || continue
+            local cmd_name
+            cmd_name=$(basename "$md_file" .md)
+            local scoped_name="${scope}:${cmd_name}"
+            convert_md_to_toml "$md_file" "$commands_dir/$scoped_name.toml"
+            print_info "  Installed: /$scoped_name"
+          done
+          print_success "Converted and installed $project_name commands (TOML)"
+          ;;
 
-      codex)
-        # Convert to Codex custom prompts (user-scoped, no project scoping)
-        local prompts_dir
-        prompts_dir=$(get_prompts_dir "$agent")
-        mkdir -p "$prompts_dir"
-        for md_file in "$source_commands"/*.md; do
-          [ -f "$md_file" ] || continue
-          local cmd_name
-          cmd_name=$(basename "$md_file" .md)
-          convert_md_to_codex_prompt "$md_file" "$prompts_dir/$cmd_name.md"
-          print_info "  Installed: $cmd_name"
-        done
-        print_success "Converted and installed $project_name prompts → $prompts_dir/"
-        ;;
+        codex)
+          # Convert to Codex custom prompts (user-scoped, no project scoping)
+          local prompts_dir
+          prompts_dir=$(get_prompts_dir "$agent")
+          mkdir -p "$prompts_dir"
+          for md_file in "$source_commands"/*.md; do
+            [ -f "$md_file" ] || continue
+            local cmd_name
+            cmd_name=$(basename "$md_file" .md)
+            convert_md_to_codex_prompt "$md_file" "$prompts_dir/$cmd_name.md"
+            print_info "  Installed: $cmd_name"
+          done
+          print_success "Converted and installed $project_name prompts → $prompts_dir/"
+          ;;
 
-      windsurf)
-        # Convert to Windsurf workflows (scope--workflow.md)
-        for md_file in "$source_commands"/*.md; do
-          [ -f "$md_file" ] || continue
-          local cmd_name
-          cmd_name=$(basename "$md_file" .md)
-          local scoped_name="${scope}--${cmd_name}"
-          convert_md_to_windsurf_workflow "$md_file" "$commands_dir/$scoped_name.md"
-          print_info "  Installed: /$scoped_name"
-        done
-        print_success "Converted and installed $project_name workflows"
-        ;;
+        windsurf)
+          # Convert to Windsurf workflows (scope--workflow.md)
+          mkdir -p "$commands_dir"
+          for md_file in "$source_commands"/*.md; do
+            [ -f "$md_file" ] || continue
+            local cmd_name
+            cmd_name=$(basename "$md_file" .md)
+            local scoped_name="${scope}--${cmd_name}"
+            convert_md_to_windsurf_workflow "$md_file" "$commands_dir/$scoped_name.md"
+            print_info "  Installed: /$scoped_name"
+          done
+          print_success "Converted and installed $project_name workflows"
+          ;;
 
-      claude|opencode)
-        # Folder-based scoping for Claude/OpenCode (scope/command.md)
-        local scoped_dir="$commands_dir/$scope"
-        mkdir -p "$scoped_dir"
-        for md_file in "$source_commands"/*.md; do
-          [ -f "$md_file" ] || continue
-          local cmd_name
-          cmd_name=$(basename "$md_file" .md)
-          cp "$md_file" "$scoped_dir/$cmd_name.md"
-          print_info "  Installed: /$scope/$cmd_name"
-        done
+        claude|opencode)
+          # Folder-based scoping for Claude/OpenCode (scope/command.md)
+          local scoped_dir="$commands_dir/$scope"
+          mkdir -p "$scoped_dir"
+          for md_file in "$source_commands"/*.md; do
+            [ -f "$md_file" ] || continue
+            local cmd_name
+            cmd_name=$(basename "$md_file" .md)
+            cp "$md_file" "$scoped_dir/$cmd_name.md"
+            print_info "  Installed: /$scope/$cmd_name"
+          done
+          print_success "Installed $project_name commands"
+          ;;
+
+        cursor|factory|amp)
+          # Flat structure with prefix (scope--command.md)
+          mkdir -p "$commands_dir"
+          for md_file in "$source_commands"/*.md; do
+            [ -f "$md_file" ] || continue
+            local cmd_name
+            cmd_name=$(basename "$md_file" .md)
+            local scoped_name="${scope}--${cmd_name}"
+            cp "$md_file" "$commands_dir/$scoped_name.md"
+            print_info "  Installed: /$scoped_name"
+          done
         print_success "Installed $project_name commands"
         ;;
 
-      cursor|factory|amp)
-        # Flat structure with prefix (scope--command.md)
+      *)
+        # Fallback: direct copy with prefix for unknown agents
+        mkdir -p "$commands_dir"
         for md_file in "$source_commands"/*.md; do
           [ -f "$md_file" ] || continue
           local cmd_name
@@ -779,22 +800,8 @@ install_project() {
         done
         print_success "Installed $project_name commands"
         ;;
-
-      *)
-        # Fallback: direct copy with prefix for unknown agents
-        if [ -n "$commands_dir" ]; then
-          for md_file in "$source_commands"/*.md; do
-            [ -f "$md_file" ] || continue
-            local cmd_name
-            cmd_name=$(basename "$md_file" .md)
-            local scoped_name="${scope}--${cmd_name}"
-            cp "$md_file" "$commands_dir/$scoped_name.md"
-            print_info "  Installed: /$scoped_name"
-          done
-          print_success "Installed $project_name commands"
-        fi
-        ;;
-    esac
+      esac
+    fi
   fi
 }
 
@@ -805,26 +812,38 @@ install_project() {
 do_install() {
   local agent="$1"
   local specific_project="$2"
+  local skills_dir_override="$3"
+  local commands_dir_override="$4"
 
   local skills_dir commands_dir
-  skills_dir=$(get_skills_dir "$agent")
-  commands_dir=$(get_commands_dir "$agent")
+  # Use overrides if provided, otherwise get from agent
+  if [ -n "$skills_dir_override" ]; then
+    skills_dir="$skills_dir_override"
+  else
+    skills_dir=$(get_skills_dir "$agent")
+  fi
+
+  if [ -n "$commands_dir_override" ]; then
+    commands_dir="$commands_dir_override"
+  else
+    commands_dir=$(get_commands_dir "$agent")
+  fi
 
   if [ -z "$skills_dir" ]; then
-    print_error "Unknown agent: $agent"
+    print_error "Unknown agent: $agent (use --skills-dir to specify custom directory)"
     return 1
   fi
 
   print_info "Installing for: $agent"
   print_info "Skills: $skills_dir/"
-  if supports_commands "$agent"; then
+  if [ -n "$commands_dir" ]; then
     print_info "Commands: $commands_dir/"
   fi
   echo ""
 
   TEMP_DIR=$(mktemp -d)
   mkdir -p "$skills_dir"
-  if supports_commands "$agent" && [ -n "$commands_dir" ]; then
+  if [ -n "$commands_dir" ]; then
     mkdir -p "$commands_dir"
   fi
 
@@ -937,6 +956,8 @@ do_list() {
 do_update() {
   local agent="$1"
   local specific_project="$2"
+  local skills_dir_override="$3"
+  local commands_dir_override="$4"
 
   # Use provided agent or detect from existing installation
   if [ -z "$agent" ]; then
@@ -951,8 +972,18 @@ do_update() {
   print_info "Updating installation for: $agent"
 
   local skills_dir commands_dir
-  skills_dir=$(get_skills_dir "$agent")
-  commands_dir=$(get_commands_dir "$agent")
+  # Use overrides if provided, otherwise get from agent
+  if [ -n "$skills_dir_override" ]; then
+    skills_dir="$skills_dir_override"
+  else
+    skills_dir=$(get_skills_dir "$agent")
+  fi
+
+  if [ -n "$commands_dir_override" ]; then
+    commands_dir="$commands_dir_override"
+  else
+    commands_dir=$(get_commands_dir "$agent")
+  fi
 
   # Get all project names and remove their skill directories
   local project_names
@@ -989,7 +1020,7 @@ do_update() {
   done
 
   # Reinstall
-  do_install "$agent" "$specific_project"
+  do_install "$agent" "$specific_project" "$skills_dir_override" "$commands_dir_override"
 }
 
 # ============================================================================
@@ -999,6 +1030,8 @@ do_update() {
 do_uninstall() {
   local agent="$1"
   local specific_project="$2"
+  local skills_dir_override="$3"
+  local commands_dir_override="$4"
 
   # Use provided agent or detect from existing installation
   if [ -z "$agent" ]; then
@@ -1013,8 +1046,18 @@ do_uninstall() {
   print_info "Uninstalling for: $agent"
 
   local skills_dir commands_dir
-  skills_dir=$(get_skills_dir "$agent")
-  commands_dir=$(get_commands_dir "$agent")
+  # Use overrides if provided, otherwise get from agent
+  if [ -n "$skills_dir_override" ]; then
+    skills_dir="$skills_dir_override"
+  else
+    skills_dir=$(get_skills_dir "$agent")
+  fi
+
+  if [ -n "$commands_dir_override" ]; then
+    commands_dir="$commands_dir_override"
+  else
+    commands_dir=$(get_commands_dir "$agent")
+  fi
 
   local project_names
   project_names=$(get_project_names)
@@ -1069,12 +1112,14 @@ show_help() {
   echo "Install Plaited skills for AI coding agents supporting agent-skills-spec."
   echo ""
   echo "Options:"
-  echo "  --agent <name>      Install for specific agent"
-  echo "  --project <name>    Install specific project only"
-  echo "  --list              List available projects"
-  echo "  --update            Update existing installation"
-  echo "  --uninstall         Remove installation"
-  echo "  --help              Show this help message"
+  echo "  --agent <name>       Install for specific agent"
+  echo "  --project <name>     Install specific project only"
+  echo "  --skills-dir <path>  Override skills directory"
+  echo "  --commands-dir <path> Override commands directory"
+  echo "  --list               List available projects"
+  echo "  --update             Update existing installation"
+  echo "  --uninstall          Remove installation"
+  echo "  --help               Show this help message"
   echo ""
   echo "Supported Agents:"
   echo ""
@@ -1105,6 +1150,8 @@ show_help() {
 main() {
   local agent=""
   local project=""
+  local skills_dir_override=""
+  local commands_dir_override=""
   local action="install"
 
   while [ $# -gt 0 ]; do
@@ -1115,6 +1162,14 @@ main() {
         ;;
       --project)
         project="$2"
+        shift 2
+        ;;
+      --skills-dir)
+        skills_dir_override="$2"
+        shift 2
+        ;;
+      --commands-dir)
+        commands_dir_override="$2"
         shift 2
         ;;
       --list)
@@ -1198,22 +1253,24 @@ main() {
         agent=$(ask_agent)
       fi
 
-      # Validate agent
-      local skills_dir
-      skills_dir=$(get_skills_dir "$agent")
-      if [ -z "$skills_dir" ]; then
-        print_error "Unknown agent: $agent"
-        print_info "Valid agents: gemini, copilot, cursor, opencode, amp, goose, factory, codex, windsurf, claude"
-        exit 1
+      # Validate agent (unless custom dirs provided)
+      if [ -z "$skills_dir_override" ]; then
+        local skills_dir
+        skills_dir=$(get_skills_dir "$agent")
+        if [ -z "$skills_dir" ]; then
+          print_error "Unknown agent: $agent"
+          print_info "Valid agents: gemini, copilot, cursor, opencode, amp, goose, factory, codex, windsurf, claude"
+          exit 1
+        fi
       fi
 
-      do_install "$agent" "$project"
+      do_install "$agent" "$project" "$skills_dir_override" "$commands_dir_override"
       ;;
     update)
-      do_update "$agent" "$project"
+      do_update "$agent" "$project" "$skills_dir_override" "$commands_dir_override"
       ;;
     uninstall)
-      do_uninstall "$agent" "$project"
+      do_uninstall "$agent" "$project" "$skills_dir_override" "$commands_dir_override"
       ;;
   esac
 }
