@@ -1,0 +1,16 @@
+{
+  "projects": [
+    {
+      "name": "development-skills",
+      "repo": "plaited/development-skills"
+    },
+    {
+      "name": "acp-harness",
+      "repo": "plaited/acp-harness"
+    },
+    {
+      "name": "plaited",
+      "repo": "plaited/plaited"
+    }
+  ]
+}

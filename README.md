@@ -1,33 +1,31 @@
-# Plaited Marketplace
+# Plaited Skills Installer
 
-Aggregator for Plaited's Claude Code plugins.
+[![CI](https://github.com/plaited/skills-installer/actions/workflows/ci.yml/badge.svg)](https://github.com/plaited/skills-installer/actions/workflows/ci.yml)
+[![License: ISC](https://img.shields.io/badge/License-ISC-blue.svg)](https://opensource.org/licenses/ISC)
+
+Install Plaited skills for AI coding agents supporting the agent-skills-spec.
 
 ## Installation
 
-### Claude Code
+For agents supporting the agent-skills-spec (Gemini CLI, GitHub Copilot, Cursor, OpenCode, Amp, Goose, Factory, Codex, Windsurf):
 
 ```bash
-claude plugins add github:plaited/marketplace
-```
+# Install all projects
+curl -fsSL https://raw.githubusercontent.com/plaited/skills-installer/main/install.sh | bash -s -- --agent <agent-name>
 
-### Other AI Coding Agents
-
-For agents supporting the AgentSkills spec (Gemini CLI, GitHub Copilot, Cursor, OpenCode, Amp, Goose, Factory):
-
-```bash
-# Install a specific plugin
-curl -fsSL https://raw.githubusercontent.com/plaited/marketplace/main/install.sh | bash -s -- --agent <agent-name> --plugin development-skills
+# Install a specific project
+curl -fsSL https://raw.githubusercontent.com/plaited/skills-installer/main/install.sh | bash -s -- --agent <agent-name> --project development-skills
 ```
 
 **Or clone and run locally:**
 
 ```bash
-git clone https://github.com/plaited/marketplace.git
-cd marketplace
+git clone https://github.com/plaited/skills-installer.git
+cd skills-installer
 ./install.sh                              # Interactive mode
 ./install.sh --agent gemini               # Install all for Gemini CLI
-./install.sh --agent cursor --plugin acp-harness  # Specific plugin
-./install.sh --list                       # List available plugins
+./install.sh --agent cursor --project acp-harness  # Specific project
+./install.sh --list                       # List available projects
 ./install.sh --update                     # Update existing
 ./install.sh --uninstall                  # Remove all
 ```
@@ -36,23 +34,25 @@ cd marketplace
 
 | Agent | Skills | Commands |
 |-------|--------|----------|
-| gemini | `.gemini/skills/` | - |
+| gemini | `.gemini/skills/` | `.gemini/commands/` (→TOML) |
 | copilot | `.github/skills/` | - |
 | cursor | `.cursor/skills/` | `.cursor/commands/` |
 | opencode | `.opencode/skill/` | `.opencode/command/` |
 | amp | `.amp/skills/` | `.amp/commands/` |
 | goose | `.goose/skills/` | - |
 | factory | `.factory/skills/` | `.factory/commands/` |
+| codex | `.codex/skills/` | `~/.codex/prompts/` (→prompt) |
+| windsurf | `.windsurf/skills/` | `.windsurf/workflows/` |
 
-## Available Plugins
+## Available Projects
 
-| Plugin | Description |
-|--------|-------------|
-| **development-skills** | Development skills for Claude Code - TypeScript LSP, code documentation, and validation tools |
-| **acp-harness** | ACP client and evaluation harness for agent testing |
-| **plaited** | Plaited framework development tools - behavioral programming, UI patterns, and web components |
+| Project | Source |
+|---------|--------|
+| **development-skills** | [plaited/development-skills](https://github.com/plaited/development-skills) |
+| **acp-harness** | [plaited/acp-harness](https://github.com/plaited/acp-harness) |
+| **plaited** | [plaited/plaited](https://github.com/plaited/plaited) |
 
-## Plugin Details
+## Project Details
 
 ### development-skills
 
