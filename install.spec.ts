@@ -45,6 +45,7 @@ get_skills_dir() {
     factory)  echo ".factory/skills" ;;
     codex)    echo ".codex/skills" ;;
     windsurf) echo ".windsurf/skills" ;;
+    claude)   echo ".claude/skills" ;;
     *)        echo "" ;;
   esac
 }
@@ -60,6 +61,7 @@ get_commands_dir() {
     factory)  echo ".factory/commands" ;;
     codex)    echo "" ;;
     windsurf) echo ".windsurf/workflows" ;;
+    claude)   echo ".claude/commands" ;;
     *)        echo "" ;;
   esac
 }
@@ -73,7 +75,7 @@ get_prompts_dir() {
 
 supports_commands() {
   case "$1" in
-    gemini|cursor|opencode|amp|factory) return 0 ;;
+    gemini|cursor|opencode|amp|factory|claude) return 0 ;;
     codex|windsurf) return 0 ;;
     *) return 1 ;;
   esac
@@ -130,7 +132,7 @@ async function callFunctionExitCode(
   const script = `
 supports_commands() {
   case "$1" in
-    gemini|cursor|opencode|amp|factory) return 0 ;;
+    gemini|cursor|opencode|amp|factory|claude) return 0 ;;
     codex|windsurf) return 0 ;;
     *) return 1 ;;
   esac
@@ -211,6 +213,7 @@ describe("install.sh - get_skills_dir", () => {
     factory: ".factory/skills",
     codex: ".codex/skills",
     windsurf: ".windsurf/skills",
+    claude: ".claude/skills",
   };
 
   for (const [agent, expectedDir] of Object.entries(expectedMappings)) {
@@ -236,6 +239,7 @@ describe("install.sh - get_commands_dir", () => {
     goose: ".goose/commands",
     factory: ".factory/commands",
     windsurf: ".windsurf/workflows", // Windsurf uses workflows
+    claude: ".claude/commands",
   };
 
   for (const [agent, expectedDir] of Object.entries(expectedMappings)) {
@@ -280,6 +284,7 @@ describe("install.sh - supports_commands", () => {
     "factory",
     "codex",
     "windsurf",
+    "claude",
   ];
   const doesNotSupportCommands = ["copilot", "goose"];
 
@@ -300,7 +305,7 @@ describe("install.sh - supports_commands", () => {
 
 describe("install.sh - needs_command_conversion", () => {
   const needsConversion = ["gemini", "codex", "windsurf"];
-  const noConversion = ["cursor", "opencode", "amp", "factory", "copilot", "goose"];
+  const noConversion = ["cursor", "opencode", "amp", "factory", "copilot", "goose", "claude"];
 
   for (const agent of needsConversion) {
     test(`${agent} needs command conversion`, async () => {
@@ -535,6 +540,7 @@ describe("README.md consistency", () => {
       ["factory", ".factory/skills"],
       ["codex", ".codex/skills"],
       ["windsurf", ".windsurf/skills"],
+      ["claude", ".claude/skills"],
     ];
 
     for (const [agent, dir] of mappings) {

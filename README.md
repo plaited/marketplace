@@ -7,7 +7,7 @@ Install Plaited skills for AI coding agents supporting the agent-skills-spec.
 
 ## Installation
 
-For agents supporting the agent-skills-spec (Gemini CLI, GitHub Copilot, Cursor, OpenCode, Amp, Goose, Factory, Codex, Windsurf):
+For agents supporting the agent-skills-spec (Gemini CLI, GitHub Copilot, Cursor, OpenCode, Amp, Goose, Factory, Codex, Windsurf, Claude Code):
 
 ```bash
 # Install all projects
@@ -43,6 +43,7 @@ cd skills-installer
 | factory | `.factory/skills/` | `.factory/commands/` |
 | codex | `.codex/skills/` | `~/.codex/prompts/` (→prompt) |
 | windsurf | `.windsurf/skills/` | `.windsurf/workflows/` |
+| claude | `.claude/skills/` | `.claude/commands/` |
 
 ## Available Projects
 
