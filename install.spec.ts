@@ -1317,3 +1317,252 @@ done
     ]);
   });
 });
+
+describe("install.sh - command scoping functions", () => {
+  // Helper to test get_command_scope_prefix
+  async function getCommandScopePrefix(repo: string): Promise<string> {
+    const script = `
+extract_org_from_repo() {
+  local repo="$1"
+  echo "\${repo%%/*}"
+}
+get_command_scope_prefix() {
+  local repo="$1"
+  local org project_name
+  org=$(extract_org_from_repo "$repo")
+  project_name="\${repo##*/}"
+  echo "\${org}_\${project_name}"
+}
+get_command_scope_prefix "${repo}"
+`;
+    const result = await $`bash -c ${script}`.quiet();
+    return result.text().trim();
+  }
+
+  describe("get_command_scope_prefix", () => {
+    test("generates scope prefix for simple repo", async () => {
+      expect(await getCommandScopePrefix("plaited/development-skills"))
+        .toBe("plaited_development-skills");
+    });
+
+    test("generates scope prefix preserving hyphens", async () => {
+      expect(await getCommandScopePrefix("plaited/acp-harness"))
+        .toBe("plaited_acp-harness");
+    });
+
+    test("generates scope prefix with dots in org", async () => {
+      expect(await getCommandScopePrefix("org.name/project"))
+        .toBe("org.name_project");
+    });
+  });
+});
+
+describe("install.sh - command installation scoping", () => {
+  const tmpDir = join(import.meta.dir, ".test-tmp-commands");
+
+  // Helper to test command installation for different agents
+  async function testCommandInstallation(
+    sourceCommands: string[],  // command file names (without .md)
+    repo: string,
+    agent: string
+  ): Promise<string[]> {
+    const { mkdir, rm, readdir, writeFile } = await import("fs/promises");
+
+    // Setup directories
+    const sourceDir = join(tmpDir, "source-commands");
+    const destDir = join(tmpDir, "dest-commands");
+    await mkdir(sourceDir, { recursive: true });
+    await mkdir(destDir, { recursive: true });
+
+    // Create source command files
+    for (const cmd of sourceCommands) {
+      await writeFile(join(sourceDir, `${cmd}.md`), `# ${cmd}\nCommand content`);
+    }
+
+    // Run the command installation logic (simplified from install.sh)
+    const script = `
+extract_org_from_repo() {
+  local repo="$1"
+  echo "\${repo%%/*}"
+}
+
+get_command_scope_prefix() {
+  local repo="$1"
+  local org project_name
+  org=$(extract_org_from_repo "$repo")
+  project_name="\${repo##*/}"
+  echo "\${org}_\${project_name}"
+}
+
+source_commands="${sourceDir}"
+commands_dir="${destDir}"
+repo="${repo}"
+agent="${agent}"
+
+scope=$(get_command_scope_prefix "$repo")
+
+case "$agent" in
+  gemini)
+    for md_file in "$source_commands"/*.md; do
+      [ -f "$md_file" ] || continue
+      cmd_name=$(basename "$md_file" .md)
+      scoped_name="\${scope}:\${cmd_name}"
+      cp "$md_file" "$commands_dir/$scoped_name.toml"
+    done
+    ;;
+
+  claude|opencode)
+    scoped_dir="$commands_dir/$scope"
+    mkdir -p "$scoped_dir"
+    for md_file in "$source_commands"/*.md; do
+      [ -f "$md_file" ] || continue
+      cmd_name=$(basename "$md_file" .md)
+      cp "$md_file" "$scoped_dir/$cmd_name.md"
+    done
+    ;;
+
+  cursor|factory|amp|windsurf)
+    for md_file in "$source_commands"/*.md; do
+      [ -f "$md_file" ] || continue
+      cmd_name=$(basename "$md_file" .md)
+      scoped_name="\${scope}--\${cmd_name}"
+      cp "$md_file" "$commands_dir/$scoped_name.md"
+    done
+    ;;
+
+  codex)
+    # User-scoped, no project scoping
+    for md_file in "$source_commands"/*.md; do
+      [ -f "$md_file" ] || continue
+      cmd_name=$(basename "$md_file" .md)
+      cp "$md_file" "$commands_dir/$cmd_name.md"
+    done
+    ;;
+esac
+`;
+
+    await $`bash -c ${script}`.quiet();
+
+    // Get resulting command file/folder names (recursively for folder-based)
+    const listFilesRecursive = async (dir: string, prefix = ""): Promise<string[]> => {
+      const entries = await readdir(dir, { withFileTypes: true });
+      const results: string[] = [];
+      for (const entry of entries) {
+        const fullPath = prefix ? `${prefix}/${entry.name}` : entry.name;
+        if (entry.isDirectory()) {
+          results.push(...await listFilesRecursive(join(dir, entry.name), fullPath));
+        } else {
+          results.push(fullPath);
+        }
+      }
+      return results;
+    };
+
+    const installed = await listFilesRecursive(destDir);
+    await rm(tmpDir, { recursive: true, force: true });
+
+    return installed.sort();
+  }
+
+  test("gemini uses colon separator (scope:command.toml)", async () => {
+    const installed = await testCommandInstallation(
+      ["commit", "review"],
+      "plaited/development-skills",
+      "gemini"
+    );
+
+    expect(installed).toEqual([
+      "plaited_development-skills:commit.toml",
+      "plaited_development-skills:review.toml"
+    ]);
+  });
+
+  test("claude uses folder-based scoping (scope/command.md)", async () => {
+    const installed = await testCommandInstallation(
+      ["commit", "review"],
+      "plaited/development-skills",
+      "claude"
+    );
+
+    expect(installed).toEqual([
+      "plaited_development-skills/commit.md",
+      "plaited_development-skills/review.md"
+    ]);
+  });
+
+  test("opencode uses folder-based scoping (scope/command.md)", async () => {
+    const installed = await testCommandInstallation(
+      ["commit", "review"],
+      "plaited/acp-harness",
+      "opencode"
+    );
+
+    expect(installed).toEqual([
+      "plaited_acp-harness/commit.md",
+      "plaited_acp-harness/review.md"
+    ]);
+  });
+
+  test("cursor uses prefix with double-dash (scope--command.md)", async () => {
+    const installed = await testCommandInstallation(
+      ["commit", "review"],
+      "plaited/development-skills",
+      "cursor"
+    );
+
+    expect(installed).toEqual([
+      "plaited_development-skills--commit.md",
+      "plaited_development-skills--review.md"
+    ]);
+  });
+
+  test("factory uses prefix with double-dash (scope--command.md)", async () => {
+    const installed = await testCommandInstallation(
+      ["commit"],
+      "plaited/development-skills",
+      "factory"
+    );
+
+    expect(installed).toEqual([
+      "plaited_development-skills--commit.md"
+    ]);
+  });
+
+  test("windsurf uses prefix with double-dash (scope--workflow.md)", async () => {
+    const installed = await testCommandInstallation(
+      ["deploy", "test"],
+      "plaited/development-skills",
+      "windsurf"
+    );
+
+    expect(installed).toEqual([
+      "plaited_development-skills--deploy.md",
+      "plaited_development-skills--test.md"
+    ]);
+  });
+
+  test("codex does not scope commands (user-scoped)", async () => {
+    const installed = await testCommandInstallation(
+      ["commit", "review"],
+      "plaited/development-skills",
+      "codex"
+    );
+
+    expect(installed).toEqual([
+      "commit.md",
+      "review.md"
+    ]);
+  });
+
+  test("amp uses prefix with double-dash (scope--command.md)", async () => {
+    const installed = await testCommandInstallation(
+      ["commit"],
+      "plaited/acp-harness",
+      "amp"
+    );
+
+    expect(installed).toEqual([
+      "plaited_acp-harness--commit.md"
+    ]);
+  });
+});

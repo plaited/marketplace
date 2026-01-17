@@ -240,6 +240,65 @@ get_scoped_skill_name() {
   echo "${skill_name}@${org}_${project_name}"
 }
 
+# Generate command scope prefix from repo: org_project
+get_command_scope_prefix() {
+  local repo="$1"
+  local org project_name
+  org=$(extract_org_from_repo "$repo")
+  project_name="${repo##*/}"
+  echo "${org}_${project_name}"
+}
+
+# Remove scoped commands for a project based on agent type
+remove_scoped_commands() {
+  local agent="$1"
+  local scope="$2"
+  local commands_dir="$3"
+
+  [ -d "$commands_dir" ] || return 0
+
+  case "$agent" in
+    gemini)
+      # Remove scope:*.toml files
+      for cmd_file in "$commands_dir"/${scope}:*.toml; do
+        [ -f "$cmd_file" ] || continue
+        rm -f "$cmd_file"
+        print_info "Removed command: $(basename "$cmd_file")"
+      done
+      ;;
+
+    claude|opencode)
+      # Remove scope/ folder
+      if [ -d "$commands_dir/$scope" ]; then
+        rm -rf "$commands_dir/$scope"
+        print_info "Removed commands folder: $scope/"
+      fi
+      ;;
+
+    cursor|factory|amp|windsurf)
+      # Remove scope--*.md files
+      for cmd_file in "$commands_dir"/${scope}--*.md; do
+        [ -f "$cmd_file" ] || continue
+        rm -f "$cmd_file"
+        print_info "Removed command: $(basename "$cmd_file")"
+      done
+      ;;
+
+    codex)
+      # User-scoped prompts - don't remove on project uninstall
+      ;;
+
+    *)
+      # Fallback: remove scope--*.md files
+      for cmd_file in "$commands_dir"/${scope}--*.md; do
+        [ -f "$cmd_file" ] || continue
+        rm -f "$cmd_file"
+        print_info "Removed command: $(basename "$cmd_file")"
+      done
+      ;;
+  esac
+}
+
 # ============================================================================
 # Format Conversion
 # ============================================================================
@@ -647,47 +706,91 @@ install_project() {
   if [ -d "$source_commands" ]; then
     print_info "Installing commands from $project_name..."
 
+    local repo
+    repo=$(get_project_repo "$project_name")
+    local scope
+    scope=$(get_command_scope_prefix "$repo")
+
     case "$agent" in
       gemini)
-        # Convert .md to .toml for Gemini CLI
+        # Convert .md to .toml for Gemini CLI (scope:command.toml)
         for md_file in "$source_commands"/*.md; do
           [ -f "$md_file" ] || continue
-          local basename
-          basename=$(basename "$md_file" .md)
-          convert_md_to_toml "$md_file" "$commands_dir/$basename.toml"
+          local cmd_name
+          cmd_name=$(basename "$md_file" .md)
+          local scoped_name="${scope}:${cmd_name}"
+          convert_md_to_toml "$md_file" "$commands_dir/$scoped_name.toml"
+          print_info "  Installed: /$scoped_name"
         done
         print_success "Converted and installed $project_name commands (TOML)"
         ;;
 
       codex)
-        # Convert to Codex custom prompts (user-scoped ~/.codex/prompts/)
+        # Convert to Codex custom prompts (user-scoped, no project scoping)
         local prompts_dir
         prompts_dir=$(get_prompts_dir "$agent")
         mkdir -p "$prompts_dir"
         for md_file in "$source_commands"/*.md; do
           [ -f "$md_file" ] || continue
-          local basename
-          basename=$(basename "$md_file" .md)
-          convert_md_to_codex_prompt "$md_file" "$prompts_dir/$basename.md"
+          local cmd_name
+          cmd_name=$(basename "$md_file" .md)
+          convert_md_to_codex_prompt "$md_file" "$prompts_dir/$cmd_name.md"
+          print_info "  Installed: $cmd_name"
         done
         print_success "Converted and installed $project_name prompts → $prompts_dir/"
         ;;
 
       windsurf)
-        # Convert to Windsurf workflows
+        # Convert to Windsurf workflows (scope--workflow.md)
         for md_file in "$source_commands"/*.md; do
           [ -f "$md_file" ] || continue
-          local basename
-          basename=$(basename "$md_file" .md)
-          convert_md_to_windsurf_workflow "$md_file" "$commands_dir/$basename.md"
+          local cmd_name
+          cmd_name=$(basename "$md_file" .md)
+          local scoped_name="${scope}--${cmd_name}"
+          convert_md_to_windsurf_workflow "$md_file" "$commands_dir/$scoped_name.md"
+          print_info "  Installed: /$scoped_name"
         done
         print_success "Converted and installed $project_name workflows"
         ;;
 
+      claude|opencode)
+        # Folder-based scoping for Claude/OpenCode (scope/command.md)
+        local scoped_dir="$commands_dir/$scope"
+        mkdir -p "$scoped_dir"
+        for md_file in "$source_commands"/*.md; do
+          [ -f "$md_file" ] || continue
+          local cmd_name
+          cmd_name=$(basename "$md_file" .md)
+          cp "$md_file" "$scoped_dir/$cmd_name.md"
+          print_info "  Installed: /$scope/$cmd_name"
+        done
+        print_success "Installed $project_name commands"
+        ;;
+
+      cursor|factory|amp)
+        # Flat structure with prefix (scope--command.md)
+        for md_file in "$source_commands"/*.md; do
+          [ -f "$md_file" ] || continue
+          local cmd_name
+          cmd_name=$(basename "$md_file" .md)
+          local scoped_name="${scope}--${cmd_name}"
+          cp "$md_file" "$commands_dir/$scoped_name.md"
+          print_info "  Installed: /$scoped_name"
+        done
+        print_success "Installed $project_name commands"
+        ;;
+
       *)
-        # Direct copy for agents with native command support
+        # Fallback: direct copy with prefix for unknown agents
         if [ -n "$commands_dir" ]; then
-          cp -r "$source_commands/"* "$commands_dir/"
+          for md_file in "$source_commands"/*.md; do
+            [ -f "$md_file" ] || continue
+            local cmd_name
+            cmd_name=$(basename "$md_file" .md)
+            local scoped_name="${scope}--${cmd_name}"
+            cp "$md_file" "$commands_dir/$scoped_name.md"
+            print_info "  Installed: /$scoped_name"
+          done
           print_success "Installed $project_name commands"
         fi
         ;;
@@ -844,8 +947,9 @@ do_update() {
 
   print_info "Updating installation for: $agent"
 
-  local skills_dir
+  local skills_dir commands_dir
   skills_dir=$(get_skills_dir "$agent")
+  commands_dir=$(get_commands_dir "$agent")
 
   # Get all project names and remove their skill directories
   local project_names
@@ -859,10 +963,11 @@ do_update() {
     # Remove all skills matching this project's scope pattern
     local repo
     repo=$(get_project_repo "$project_name")
-    local org project_suffix scope_pattern
+    local org project_suffix scope_pattern scope
     org=$(extract_org_from_repo "$repo")
     project_suffix="${repo##*/}"
     scope_pattern="@${org}_${project_suffix}$"
+    scope="${org}_${project_suffix}"
 
     for skill_folder in "$skills_dir"/*; do
       [ -d "$skill_folder" ] || continue
@@ -870,9 +975,14 @@ do_update() {
       skill_name=$(basename "$skill_folder")
       if [[ "$skill_name" =~ $scope_pattern ]]; then
         rm -rf "$skill_folder"
-        print_info "Removed: $skill_name"
+        print_info "Removed skill: $skill_name"
       fi
     done
+
+    # Remove scoped commands
+    if [ -n "$commands_dir" ]; then
+      remove_scoped_commands "$agent" "$scope" "$commands_dir"
+    fi
   done
 
   # Reinstall
@@ -895,8 +1005,9 @@ do_uninstall() {
 
   print_info "Uninstalling for: $agent"
 
-  local skills_dir
+  local skills_dir commands_dir
   skills_dir=$(get_skills_dir "$agent")
+  commands_dir=$(get_commands_dir "$agent")
 
   local project_names
   project_names=$(get_project_names)
@@ -910,10 +1021,11 @@ do_uninstall() {
     # Remove all skills matching this project's scope pattern
     local repo
     repo=$(get_project_repo "$project_name")
-    local org project_suffix scope_pattern
+    local org project_suffix scope_pattern scope
     org=$(extract_org_from_repo "$repo")
     project_suffix="${repo##*/}"
     scope_pattern="@${org}_${project_suffix}$"
+    scope="${org}_${project_suffix}"
 
     for skill_folder in "$skills_dir"/*; do
       [ -d "$skill_folder" ] || continue
@@ -921,10 +1033,15 @@ do_uninstall() {
       skill_name=$(basename "$skill_folder")
       if [[ "$skill_name" =~ $scope_pattern ]]; then
         rm -rf "$skill_folder"
-        print_success "Removed $skill_name"
+        print_success "Removed skill: $skill_name"
         removed=$((removed + 1))
       fi
     done
+
+    # Remove scoped commands
+    if [ -n "$commands_dir" ]; then
+      remove_scoped_commands "$agent" "$scope" "$commands_dir"
+    fi
   done
 
   if [ "$removed" -eq 0 ]; then
