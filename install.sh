@@ -56,6 +56,9 @@ get_commands_dir() {
 }
 
 # Get the prompts directory for agents that use user-scoped prompts
+# Note: Codex uses a global ~/.codex/prompts directory (user-scoped, not project-local).
+# This means all Codex projects share the same prompts. This is intentional as Codex
+# custom prompts are designed to be user-level, not project-level. See Codex docs for details.
 get_prompts_dir() {
   case "$1" in
     codex) echo "$HOME/.codex/prompts" ;;
@@ -145,6 +148,19 @@ get_project_repo() {
 # Returns: repo_url sparse_path (always .claude)
 parse_source() {
   local repo="$1"
+
+  # Validate against path traversal attacks
+  if [[ "$repo" =~ \.\. ]]; then
+    print_error "Invalid repository path (path traversal detected): $repo"
+    return 1
+  fi
+
+  # Validate repo format (owner/repo)
+  if ! [[ "$repo" =~ ^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+$ ]]; then
+    print_error "Invalid repository format: $repo (expected: owner/repo)"
+    return 1
+  fi
+
   echo "https://github.com/$repo.git" ".claude"
 }
 
@@ -177,7 +193,8 @@ convert_md_to_toml() {
   ' "$md_file")
 
   # Replace $ARGUMENTS with {{args}}
-  body=$(echo "$body" | sed 's/\$ARGUMENTS/{{args}}/g')
+  # Use printf instead of echo to safely handle arbitrary input (avoids command injection)
+  body=$(printf '%s\n' "$body" | sed 's/\$ARGUMENTS/{{args}}/g')
 
   # Write TOML file
   {
@@ -232,15 +249,15 @@ convert_md_to_codex_prompt() {
 
   # If still no description, extract from first line of body
   if [ -z "$description" ]; then
-    description=$(echo "$body" | head -1 | sed 's/^#* *//' | cut -c1-80)
+    description=$(printf '%s\n' "$body" | head -1 | sed 's/^#* *//' | cut -c1-80)
   fi
 
   # Detect if command uses arguments (look for placeholders like $1, $FILE, etc.)
   local argument_hint=""
-  if echo "$body" | grep -qE '\$[0-9]|\$[A-Z_]+'; then
+  if printf '%s\n' "$body" | grep -qE '\$[0-9]|\$[A-Z_]+'; then
     # Extract named placeholders
     local placeholders
-    placeholders=$(echo "$body" | grep -oE '\$[A-Z_]+' | sort -u | tr '\n' ' ')
+    placeholders=$(printf '%s\n' "$body" | grep -oE '\$[A-Z_]+' | sort -u | tr '\n' ' ')
     if [ -n "$placeholders" ]; then
       argument_hint=$(echo "$placeholders" | sed 's/\$\([A-Z_]*\)/\1=<value>/g' | tr -s ' ')
     fi
@@ -312,26 +329,26 @@ convert_md_to_windsurf_workflow() {
 
   # If still no name, extract from first heading
   if [ -z "$name" ]; then
-    name=$(echo "$body" | grep -m1 '^#' | sed 's/^#* *//')
+    name=$(printf '%s\n' "$body" | grep -m1 '^#' | sed 's/^#* *//')
   fi
 
   # If still no description, use first non-heading line
   if [ -z "$description" ]; then
-    description=$(echo "$body" | grep -v '^#' | grep -v '^$' | head -1 | cut -c1-100)
+    description=$(printf '%s\n' "$body" | grep -v '^#' | grep -v '^$' | head -1 | cut -c1-100)
   fi
 
-  # Check content length (Windsurf has 12000 char limit)
+  # Check content length (Windsurf has 12000 char limit, using 11500 to leave buffer)
   local content_length
-  content_length=$(echo "$body" | wc -c)
+  content_length=$(printf '%s' "$body" | wc -c)
   if [ "$content_length" -gt 11500 ]; then
     print_info "Warning: $md_file exceeds Windsurf 12k char limit, truncating"
-    body=$(echo "$body" | head -c 11500)
+    body=$(printf '%s' "$body" | head -c 11500)
     body="$body"$'\n\n'"[Content truncated - see original skill for full instructions]"
   fi
 
   # Check if body already has numbered steps structure
   local has_steps
-  has_steps=$(echo "$body" | grep -cE '^[0-9]+\.' || true)
+  has_steps=$(printf '%s\n' "$body" | grep -cE '^[0-9]+\.' || true)
 
   # Write Windsurf workflow file
   {
@@ -437,14 +454,21 @@ clone_project() {
   local source="$2"
 
   # Parse source into repo URL and sparse path
-  read repo_url sparse_path <<< "$(parse_source "$source")"
+  local parse_result
+  if ! parse_result=$(parse_source "$source"); then
+    return 1
+  fi
+  read repo_url sparse_path <<< "$parse_result"
 
   print_info "Cloning $project_name from $repo_url..."
 
   local project_temp="$TEMP_DIR/$project_name"
   mkdir -p "$project_temp"
 
-  git clone --depth 1 --filter=blob:none --sparse "$repo_url" "$project_temp" --branch "$BRANCH" 2>/dev/null
+  if ! git clone --depth 1 --filter=blob:none --sparse "$repo_url" "$project_temp" --branch "$BRANCH" 2>/dev/null; then
+    print_error "Failed to clone $project_name from $repo_url"
+    return 1
+  fi
 
   cd "$project_temp"
   # Fetch both skills and commands directories
@@ -452,7 +476,7 @@ clone_project() {
   cd - > /dev/null
 
   # Store the sparse path for later use
-  echo "$sparse_path" > "$project_temp/.sparse_path"
+  printf '%s' "$sparse_path" > "$project_temp/.sparse_path"
 
   print_success "Cloned $project_name"
 }
@@ -579,7 +603,9 @@ do_install() {
       continue
     fi
 
-    clone_project "$project_name" "$source"
+    if ! clone_project "$project_name" "$source"; then
+      continue
+    fi
     install_project "$project_name" "$skills_dir" "$commands_dir" "$agent"
     projects_installed=$((projects_installed + 1))
   done

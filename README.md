@@ -1,5 +1,8 @@
 # Plaited Skills Installer
 
+[![CI](https://github.com/plaited/acp-harness/actions/workflows/ci.yml/badge.svg)](https://github.com/plaited/acp-harness/actions/workflows/ci.yml)
+[![License: ISC](https://img.shields.io/badge/License-ISC-blue.svg)](https://opensource.org/licenses/ISC)
+
 Install Plaited skills for AI coding agents supporting the agent-skills-spec.
 
 ## Installation
