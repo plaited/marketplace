@@ -976,3 +976,126 @@ Deploy the application to staging.
     expect(workflow).toContain("1. Build the app");
   });
 });
+
+describe("install.sh - skill scoping functions", () => {
+  // Helper to test is_scoped_skill (returns exit code 0 for true, 1 for false)
+  async function isScopedSkill(skillName: string): Promise<boolean> {
+    const script = `
+is_scoped_skill() {
+  local skill_name="$1"
+  [[ "$skill_name" =~ ^.+@[a-zA-Z0-9._-]+_[a-zA-Z0-9._-]+$ ]]
+}
+is_scoped_skill "${skillName}"
+`;
+    try {
+      await $`bash -c ${script}`.quiet();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // Helper to test extract_org_from_repo
+  async function extractOrgFromRepo(repo: string): Promise<string> {
+    const script = `
+extract_org_from_repo() {
+  local repo="$1"
+  echo "\${repo%%/*}"
+}
+extract_org_from_repo "${repo}"
+`;
+    const result = await $`bash -c ${script}`.quiet();
+    return result.text().trim();
+  }
+
+  // Helper to test get_scoped_skill_name
+  async function getScopedSkillName(skillName: string, repo: string): Promise<string> {
+    const script = `
+extract_org_from_repo() {
+  local repo="$1"
+  echo "\${repo%%/*}"
+}
+get_scoped_skill_name() {
+  local skill_name="$1"
+  local repo="$2"
+  local org project_name
+  org=$(extract_org_from_repo "$repo")
+  project_name="\${repo##*/}"
+  echo "\${skill_name}@\${org}_\${project_name}"
+}
+get_scoped_skill_name "${skillName}" "${repo}"
+`;
+    const result = await $`bash -c ${script}`.quiet();
+    return result.text().trim();
+  }
+
+  describe("is_scoped_skill", () => {
+    test("returns true for scoped skill name", async () => {
+      expect(await isScopedSkill("typescript-lsp@plaited_development-skills")).toBe(true);
+    });
+
+    test("returns true for scoped skill with dots in org", async () => {
+      expect(await isScopedSkill("my-skill@org.name_project")).toBe(true);
+    });
+
+    test("returns true for scoped skill with underscores", async () => {
+      expect(await isScopedSkill("my_skill@my_org_my_project")).toBe(true);
+    });
+
+    test("returns false for unscoped skill name", async () => {
+      expect(await isScopedSkill("typescript-lsp")).toBe(false);
+    });
+
+    test("returns false for skill name with @ but wrong format", async () => {
+      expect(await isScopedSkill("skill@invalid")).toBe(false);
+    });
+
+    test("returns false for empty string", async () => {
+      expect(await isScopedSkill("")).toBe(false);
+    });
+
+    test("returns false for skill with @ but no underscore after", async () => {
+      expect(await isScopedSkill("skill@orgproject")).toBe(false);
+    });
+  });
+
+  describe("extract_org_from_repo", () => {
+    test("extracts org from simple repo path", async () => {
+      expect(await extractOrgFromRepo("plaited/development-skills")).toBe("plaited");
+    });
+
+    test("extracts org from repo with hyphens", async () => {
+      expect(await extractOrgFromRepo("my-org/my-project")).toBe("my-org");
+    });
+
+    test("extracts org from repo with underscores", async () => {
+      expect(await extractOrgFromRepo("my_org/project_name")).toBe("my_org");
+    });
+
+    test("extracts org from repo with dots", async () => {
+      expect(await extractOrgFromRepo("org.name/project")).toBe("org.name");
+    });
+  });
+
+  describe("get_scoped_skill_name", () => {
+    test("generates scoped name for simple skill", async () => {
+      expect(await getScopedSkillName("typescript-lsp", "plaited/development-skills"))
+        .toBe("typescript-lsp@plaited_development-skills");
+    });
+
+    test("generates scoped name preserving hyphens in project", async () => {
+      expect(await getScopedSkillName("harness-skill", "plaited/acp-harness"))
+        .toBe("harness-skill@plaited_acp-harness");
+    });
+
+    test("generates scoped name for skill with underscores", async () => {
+      expect(await getScopedSkillName("my_skill", "org/project"))
+        .toBe("my_skill@org_project");
+    });
+
+    test("generates scoped name preserving dots in org", async () => {
+      expect(await getScopedSkillName("skill", "org.name/project"))
+        .toBe("skill@org.name_project");
+    });
+  });
+});

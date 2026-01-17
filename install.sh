@@ -215,6 +215,32 @@ parse_source() {
 }
 
 # ============================================================================
+# Skill Scoping Functions
+# ============================================================================
+
+# Check if a skill folder is already scoped (has @org_project suffix)
+is_scoped_skill() {
+  local skill_name="$1"
+  [[ "$skill_name" =~ ^.+@[a-zA-Z0-9._-]+_[a-zA-Z0-9._-]+$ ]]
+}
+
+# Extract org from repo path (e.g., "plaited" from "plaited/development-skills")
+extract_org_from_repo() {
+  local repo="$1"
+  echo "${repo%%/*}"
+}
+
+# Generate scoped skill name: skill-name@org_project
+get_scoped_skill_name() {
+  local skill_name="$1"
+  local repo="$2"
+  local org project_name
+  org=$(extract_org_from_repo "$repo")
+  project_name="${repo##*/}"
+  echo "${skill_name}@${org}_${project_name}"
+}
+
+# ============================================================================
 # Format Conversion
 # ============================================================================
 #
@@ -590,7 +616,29 @@ install_project() {
 
   if [ -d "$source_skills" ]; then
     print_info "Installing skills from $project_name..."
-    cp -r "$source_skills/"* "$skills_dir/"
+
+    local repo
+    repo=$(get_project_repo "$project_name")
+
+    for skill_folder in "$source_skills"/*; do
+      [ -d "$skill_folder" ] || continue
+
+      local skill_name
+      skill_name=$(basename "$skill_folder")
+
+      if is_scoped_skill "$skill_name"; then
+        # Already scoped - copy as-is (inherited skill)
+        cp -r "$skill_folder" "$skills_dir/"
+        print_info "  Preserved: $skill_name"
+      else
+        # Not scoped - rename with scope
+        local scoped_name
+        scoped_name=$(get_scoped_skill_name "$skill_name" "$repo")
+        cp -r "$skill_folder" "$skills_dir/$scoped_name"
+        print_info "  Installed: $scoped_name"
+      fi
+    done
+
     print_success "Installed $project_name skills"
   else
     print_info "No skills directory in $project_name ($sparse_path/skills)"
@@ -808,9 +856,23 @@ do_update() {
       continue
     fi
 
-    # Each project may install multiple skills - we need to check what was installed
-    # For now, remove known skill directories
-    [ -d "$skills_dir/$project_name" ] && rm -rf "$skills_dir/$project_name"
+    # Remove all skills matching this project's scope pattern
+    local repo
+    repo=$(get_project_repo "$project_name")
+    local org project_suffix scope_pattern
+    org=$(extract_org_from_repo "$repo")
+    project_suffix="${repo##*/}"
+    scope_pattern="@${org}_${project_suffix}$"
+
+    for skill_folder in "$skills_dir"/*; do
+      [ -d "$skill_folder" ] || continue
+      local skill_name
+      skill_name=$(basename "$skill_folder")
+      if [[ "$skill_name" =~ $scope_pattern ]]; then
+        rm -rf "$skill_folder"
+        print_info "Removed: $skill_name"
+      fi
+    done
   done
 
   # Reinstall
@@ -845,18 +907,31 @@ do_uninstall() {
       continue
     fi
 
-    if [ -d "$skills_dir/$project_name" ]; then
-      rm -rf "$skills_dir/$project_name"
-      print_success "Removed $skills_dir/$project_name/"
-      removed=$((removed + 1))
-    fi
+    # Remove all skills matching this project's scope pattern
+    local repo
+    repo=$(get_project_repo "$project_name")
+    local org project_suffix scope_pattern
+    org=$(extract_org_from_repo "$repo")
+    project_suffix="${repo##*/}"
+    scope_pattern="@${org}_${project_suffix}$"
+
+    for skill_folder in "$skills_dir"/*; do
+      [ -d "$skill_folder" ] || continue
+      local skill_name
+      skill_name=$(basename "$skill_folder")
+      if [[ "$skill_name" =~ $scope_pattern ]]; then
+        rm -rf "$skill_folder"
+        print_success "Removed $skill_name"
+        removed=$((removed + 1))
+      fi
+    done
   done
 
   if [ "$removed" -eq 0 ]; then
-    print_info "No Plaited projects found in $skills_dir/"
+    print_info "No Plaited skills found in $skills_dir/"
   else
     echo ""
-    print_success "Uninstalled $removed project(s)"
+    print_success "Uninstalled $removed skill(s)"
   fi
 }
 
