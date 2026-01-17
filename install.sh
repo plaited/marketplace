@@ -25,6 +25,20 @@ TEMP_DIR=""
 MAX_FILE_SIZE=102400
 
 # Safely read file contents with size limit check
+# Get file size using stat (more efficient than wc -c as it doesn't read the file)
+get_file_size() {
+  local file="$1"
+  # macOS uses -f%z, Linux uses -c%s
+  if stat -f%z "$file" 2>/dev/null; then
+    return 0
+  elif stat -c%s "$file" 2>/dev/null; then
+    return 0
+  else
+    # Fallback to wc -c if stat doesn't work
+    wc -c < "$file" | tr -d ' '
+  fi
+}
+
 safe_read_file() {
   local file="$1"
   local max_size="${2:-$MAX_FILE_SIZE}"
@@ -34,7 +48,7 @@ safe_read_file() {
   fi
 
   local file_size
-  file_size=$(wc -c < "$file")
+  file_size=$(get_file_size "$file")
 
   if [ "$file_size" -gt "$max_size" ]; then
     print_error "File exceeds size limit ($max_size bytes): $file"
@@ -190,30 +204,103 @@ parse_source() {
 # ============================================================================
 # Format Conversion
 # ============================================================================
+#
+# Conversion Algorithm Overview:
+# -----------------------------
+# Different AI agents expect commands/prompts in different formats.
+# These functions convert from the standard agent-skills-spec markdown format
+# to each agent's native format.
+#
+# Source format (agent-skills-spec):
+#   - Markdown file with optional YAML frontmatter (---)
+#   - Frontmatter may contain: name, description, allowed-tools
+#   - Body contains the prompt/command instructions
+#   - May use $ARGUMENTS placeholder for user input
+#
+# Target formats:
+#   1. Gemini TOML: description + prompt fields in TOML syntax
+#   2. Codex prompt: Markdown with description/argument-hint frontmatter
+#   3. Windsurf workflow: Structured markdown with title, description, steps
+#
+# Security considerations:
+#   - All file reads go through safe_read_file() with size limits
+#   - No shell expansion of file content (uses printf, not echo)
+#   - AWK patterns are static, not user-controlled
+# ============================================================================
+
+# Shared frontmatter extraction helpers (reduces code duplication)
+
+# Check if file has YAML frontmatter (starts with ---)
+has_frontmatter() {
+  local file="$1"
+  if [ ! -f "$file" ]; then
+    return 1
+  fi
+  head -1 "$file" 2>/dev/null | grep -q '^---$'
+}
+
+# Extract a field from YAML frontmatter
+# Usage: extract_frontmatter_field "file.md" "description"
+# Returns: field value on stdout, exit code 0 on success
+# Note: Returns empty string (not error) if field not found - this is intentional
+extract_frontmatter_field() {
+  local file="$1"
+  local field="$2"
+  local strip_quotes="${3:-true}"
+
+  if [ ! -f "$file" ]; then
+    print_error "File not found: $file"
+    return 1
+  fi
+
+  local result
+  if ! result=$(awk -v field="$field" -v strip="$strip_quotes" '
+    /^---$/ { if (in_front) exit; in_front=1; next }
+    in_front && $0 ~ "^" field ":" {
+      sub("^" field ":[[:space:]]*", "")
+      if (strip == "true") {
+        gsub(/^["'"'"']|["'"'"']$/, "")
+      }
+      print
+      exit
+    }
+  ' "$file" 2>&1); then
+    print_error "AWK parsing failed for $file: $result"
+    return 1
+  fi
+
+  printf '%s' "$result"
+}
+
+# Extract body content (everything after YAML frontmatter)
+# Returns: body content on stdout, exit code 0 on success
+extract_body() {
+  local file="$1"
+
+  if [ ! -f "$file" ]; then
+    print_error "File not found: $file"
+    return 1
+  fi
+
+  # Run AWK directly to preserve output formatting (including newlines)
+  awk '
+    /^---$/ { count++; if (count == 2) { getbody=1; next } }
+    getbody { print }
+  ' "$file"
+}
 
 # Convert markdown command to Gemini TOML format
 convert_md_to_toml() {
   local md_file="$1"
   local toml_file="$2"
 
-  # Extract description from YAML frontmatter
+  # Extract description from YAML frontmatter (escape quotes for TOML)
   local description
-  description=$(awk '
-    /^---$/ { if (in_front) exit; in_front=1; next }
-    in_front && /^description:/ {
-      sub(/^description:[[:space:]]*/, "")
-      gsub(/"/, "\\\"")
-      print
-      exit
-    }
-  ' "$md_file")
+  description=$(extract_frontmatter_field "$md_file" "description" "false" | sed 's/"/\\"/g')
 
   # Get body (everything after second ---)
   local body
-  body=$(awk '
-    /^---$/ { count++; if (count == 2) { getbody=1; next } }
-    getbody { print }
-  ' "$md_file")
+  body=$(extract_body "$md_file")
 
   # Replace $ARGUMENTS with {{args}}
   # Use printf instead of echo to safely handle arbitrary input (avoids command injection)
@@ -238,30 +325,14 @@ convert_md_to_codex_prompt() {
   local md_file="$1"
   local prompt_file="$2"
 
-  # Check if file already has YAML frontmatter
-  local has_frontmatter
-  has_frontmatter=$(head -1 "$md_file" | grep -c '^---$' || true)
-
   local description=""
   local body=""
 
-  if [ "$has_frontmatter" -eq 1 ]; then
-    # Extract existing description
-    description=$(awk '
-      /^---$/ { if (in_front) exit; in_front=1; next }
-      in_front && /^description:/ {
-        sub(/^description:[[:space:]]*/, "")
-        gsub(/^["'\'']|["'\'']$/, "")
-        print
-        exit
-      }
-    ' "$md_file")
-
-    # Get body (everything after second ---)
-    body=$(awk '
-      /^---$/ { count++; if (count == 2) { getbody=1; next } }
-      getbody { print }
-    ' "$md_file")
+  if has_frontmatter "$md_file"; then
+    # Extract existing description using shared helper
+    description=$(extract_frontmatter_field "$md_file" "description")
+    # Get body using shared helper
+    body=$(extract_body "$md_file")
   else
     # No frontmatter - use filename as basis for description
     local basename
@@ -308,42 +379,16 @@ convert_md_to_windsurf_workflow() {
   local md_file="$1"
   local workflow_file="$2"
 
-  # Check if file already has YAML frontmatter
-  local has_frontmatter
-  has_frontmatter=$(head -1 "$md_file" | grep -c '^---$' || true)
-
   local name=""
   local description=""
   local body=""
 
-  if [ "$has_frontmatter" -eq 1 ]; then
-    # Extract name from frontmatter
-    name=$(awk '
-      /^---$/ { if (in_front) exit; in_front=1; next }
-      in_front && /^name:/ {
-        sub(/^name:[[:space:]]*/, "")
-        gsub(/^["'\'']|["'\'']$/, "")
-        print
-        exit
-      }
-    ' "$md_file")
-
-    # Extract description from frontmatter
-    description=$(awk '
-      /^---$/ { if (in_front) exit; in_front=1; next }
-      in_front && /^description:/ {
-        sub(/^description:[[:space:]]*/, "")
-        gsub(/^["'\'']|["'\'']$/, "")
-        print
-        exit
-      }
-    ' "$md_file")
-
-    # Get body (everything after second ---)
-    body=$(awk '
-      /^---$/ { count++; if (count == 2) { getbody=1; next } }
-      getbody { print }
-    ' "$md_file")
+  if has_frontmatter "$md_file"; then
+    # Extract name and description using shared helpers
+    name=$(extract_frontmatter_field "$md_file" "name")
+    description=$(extract_frontmatter_field "$md_file" "description")
+    # Get body using shared helper
+    body=$(extract_body "$md_file")
   else
     # No frontmatter - derive from filename
     local basename
@@ -485,14 +530,28 @@ clone_project() {
   local project_temp="$TEMP_DIR/$project_name"
   mkdir -p "$project_temp"
 
-  if ! git clone --depth 1 --filter=blob:none --sparse "$repo_url" "$project_temp" --branch "$BRANCH" 2>/dev/null; then
+  local clone_output
+  if ! clone_output=$(git clone --depth 1 --filter=blob:none --sparse "$repo_url" "$project_temp" --branch "$BRANCH" 2>&1); then
     print_error "Failed to clone $project_name from $repo_url"
+    print_error "Git error: $clone_output"
+    rm -rf "$project_temp"
     return 1
   fi
 
-  cd "$project_temp"
+  cd "$project_temp" || {
+    print_error "Failed to access cloned directory: $project_temp"
+    return 1
+  }
+
   # Fetch both skills and commands directories
-  git sparse-checkout set "$sparse_path/skills" "$sparse_path/commands" 2>/dev/null
+  local sparse_output
+  if ! sparse_output=$(git sparse-checkout set "$sparse_path/skills" "$sparse_path/commands" 2>&1); then
+    print_error "Failed to set sparse checkout for $project_name"
+    print_error "Git error: $sparse_output"
+    cd - > /dev/null
+    rm -rf "$project_temp"
+    return 1
+  fi
   cd - > /dev/null
 
   # Store the sparse path for later use
@@ -883,21 +942,32 @@ main() {
       exit 1
     fi
 
-    # Verify checksum if available (security: prevent tampered downloads)
-    if [ -s "$checksum_file" ]; then
-      local expected_checksum actual_checksum
-      expected_checksum=$(awk '{print $1}' "$checksum_file")
-      actual_checksum=$(shasum -a 256 "$PROJECTS_JSON" 2>/dev/null | awk '{print $1}')
-
-      if [ "$expected_checksum" != "$actual_checksum" ]; then
-        print_error "Checksum verification failed for projects.json"
-        print_error "Expected: $expected_checksum"
-        print_error "Got: $actual_checksum"
-        rm -f "$checksum_file"
-        exit 1
-      fi
-      print_info "Checksum verified for projects.json"
+    # Verify checksum (mandatory - security: prevent tampered downloads)
+    if [ ! -s "$checksum_file" ]; then
+      print_error "Could not fetch checksum file - cannot verify projects.json integrity"
+      print_error "This is a security requirement. Aborting."
+      rm -f "$PROJECTS_JSON"
+      exit 1
     fi
+
+    local expected_checksum actual_checksum
+    expected_checksum=$(awk '{print $1}' "$checksum_file")
+    actual_checksum=$(shasum -a 256 "$PROJECTS_JSON" 2>/dev/null | awk '{print $1}')
+
+    if [ -z "$actual_checksum" ]; then
+      print_error "Could not compute checksum - shasum not available"
+      rm -f "$checksum_file" "$PROJECTS_JSON"
+      exit 1
+    fi
+
+    if [ "$expected_checksum" != "$actual_checksum" ]; then
+      print_error "Checksum verification failed for projects.json"
+      print_error "Expected: $expected_checksum"
+      print_error "Got: $actual_checksum"
+      rm -f "$checksum_file" "$PROJECTS_JSON"
+      exit 1
+    fi
+    print_info "Checksum verified for projects.json"
     rm -f "$checksum_file"
   fi
 

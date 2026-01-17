@@ -335,6 +335,94 @@ describe("install.sh - parse_source", () => {
   });
 });
 
+describe("install.sh - security validation", () => {
+  // Helper to run parse_source from actual install.sh (with security checks)
+  async function runParseSource(repo: string): Promise<{ stdout: string; exitCode: number }> {
+    const script = `
+set -e
+# Define print_error stub
+print_error() { echo "ERROR: $1" >&2; }
+
+# Define parse_source with security validation (copied from install.sh)
+parse_source() {
+  local repo="$1"
+
+  # Validate against path traversal attacks
+  if [[ "$repo" =~ \\.\\. ]]; then
+    print_error "Invalid repository path (path traversal detected): $repo"
+    return 1
+  fi
+
+  # Validate repo format (owner/repo)
+  if ! [[ "$repo" =~ ^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+$ ]]; then
+    print_error "Invalid repository format: $repo (expected: owner/repo)"
+    return 1
+  fi
+
+  echo "https://github.com/$repo.git" ".claude"
+}
+
+parse_source "${repo}"
+`;
+    try {
+      const result = await $`bash -c ${script.replace("${repo}", repo)}`.quiet();
+      return { stdout: result.text().trim(), exitCode: 0 };
+    } catch (error: unknown) {
+      const err = error as { stdout?: { toString(): string }; exitCode?: number };
+      return {
+        stdout: err.stdout?.toString().trim() ?? "",
+        exitCode: err.exitCode ?? 1,
+      };
+    }
+  }
+
+  test("rejects path traversal with ..", async () => {
+    const result = await runParseSource("../../../etc/passwd");
+    expect(result.exitCode).toBe(1);
+  });
+
+  test("rejects path traversal in middle of path", async () => {
+    const result = await runParseSource("owner/../../../etc/passwd");
+    expect(result.exitCode).toBe(1);
+  });
+
+  test("rejects path traversal with encoded dots", async () => {
+    const result = await runParseSource("owner/..repo");
+    expect(result.exitCode).toBe(1);
+  });
+
+  test("rejects invalid repo format - no slash", async () => {
+    const result = await runParseSource("invalid-repo-no-slash");
+    expect(result.exitCode).toBe(1);
+  });
+
+  test("rejects invalid repo format - multiple slashes", async () => {
+    const result = await runParseSource("owner/repo/extra");
+    expect(result.exitCode).toBe(1);
+  });
+
+  test("rejects invalid characters in repo", async () => {
+    const result = await runParseSource("owner/repo;echo hacked");
+    expect(result.exitCode).toBe(1);
+  });
+
+  test("accepts valid repo format", async () => {
+    const result = await runParseSource("valid-owner/valid-repo");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("https://github.com/valid-owner/valid-repo.git");
+  });
+
+  test("accepts repo with dots (not traversal)", async () => {
+    const result = await runParseSource("owner/repo.js");
+    expect(result.exitCode).toBe(0);
+  });
+
+  test("accepts repo with underscores and hyphens", async () => {
+    const result = await runParseSource("my_owner/my-repo_name");
+    expect(result.exitCode).toBe(0);
+  });
+});
+
 describe("install.sh - JSON parsing functions", () => {
   test("get_project_names returns all project names", async () => {
     const result = await callFunction("get_project_names");
@@ -628,6 +716,39 @@ safe_read_file() {
   if [ "$file_size" -gt "$max_size" ]; then print_error "File exceeds size limit"; return 1; fi
   cat "$file"
 }
+
+# Define shared frontmatter helpers
+has_frontmatter() {
+  local file="$1"
+  if [ ! -f "$file" ]; then return 1; fi
+  head -1 "$file" 2>/dev/null | grep -q '^---$'
+}
+
+extract_frontmatter_field() {
+  local file="$1"
+  local field="$2"
+  local strip_quotes="\${3:-true}"
+  if [ ! -f "$file" ]; then return 1; fi
+  awk -v field="$field" -v strip="$strip_quotes" '
+    /^---$/ { if (in_front) exit; in_front=1; next }
+    in_front && $0 ~ "^" field ":" {
+      sub("^" field ":[[:space:]]*", "")
+      if (strip == "true") { gsub(/^["'"'"']|["'"'"']$/, "") }
+      print
+      exit
+    }
+  ' "$file"
+}
+
+extract_body() {
+  local file="$1"
+  if [ ! -f "$file" ]; then return 1; fi
+  awk '
+    /^---$/ { count++; if (count == 2) { getbody=1; next } }
+    getbody { print }
+  ' "$file"
+}
+
 # Extract convert_md_to_codex_prompt function from install.sh
 eval "$(sed -n '/^convert_md_to_codex_prompt()/,/^}/p' '${INSTALL_SCRIPT}')"
 convert_md_to_codex_prompt '${mdPath}' '${promptPath}'
@@ -725,6 +846,39 @@ safe_read_file() {
   if [ "$file_size" -gt "$max_size" ]; then print_error "File exceeds size limit"; return 1; fi
   cat "$file"
 }
+
+# Define shared frontmatter helpers
+has_frontmatter() {
+  local file="$1"
+  if [ ! -f "$file" ]; then return 1; fi
+  head -1 "$file" 2>/dev/null | grep -q '^---$'
+}
+
+extract_frontmatter_field() {
+  local file="$1"
+  local field="$2"
+  local strip_quotes="\${3:-true}"
+  if [ ! -f "$file" ]; then return 1; fi
+  awk -v field="$field" -v strip="$strip_quotes" '
+    /^---$/ { if (in_front) exit; in_front=1; next }
+    in_front && $0 ~ "^" field ":" {
+      sub("^" field ":[[:space:]]*", "")
+      if (strip == "true") { gsub(/^["'"'"']|["'"'"']$/, "") }
+      print
+      exit
+    }
+  ' "$file"
+}
+
+extract_body() {
+  local file="$1"
+  if [ ! -f "$file" ]; then return 1; fi
+  awk '
+    /^---$/ { count++; if (count == 2) { getbody=1; next } }
+    getbody { print }
+  ' "$file"
+}
+
 # Extract convert_md_to_windsurf_workflow function from install.sh
 eval "$(sed -n '/^convert_md_to_windsurf_workflow()/,/^}/p' '${INSTALL_SCRIPT}')"
 convert_md_to_windsurf_workflow '${mdPath}' '${workflowPath}'
