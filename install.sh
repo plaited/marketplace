@@ -20,19 +20,26 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECTS_JSON="$SCRIPT_DIR/projects.json"
 BRANCH="main"
 TEMP_DIR=""
+TEMP_PROJECTS_JSON=""  # Track if projects.json is a temp file that needs cleanup
 
 # Security: Maximum file size for reading (100KB) to prevent resource exhaustion
 MAX_FILE_SIZE=102400
 
+# Windsurf workflow character limit (12000 with 500 char buffer for truncation message)
+WINDSURF_CHAR_LIMIT=11500
+
 # Safely read file contents with size limit check
 # Get file size using stat (more efficient than wc -c as it doesn't read the file)
+# Outputs file size in bytes to stdout
 get_file_size() {
   local file="$1"
+  local size
+
   # macOS uses -f%z, Linux uses -c%s
-  if stat -f%z "$file" 2>/dev/null; then
-    return 0
-  elif stat -c%s "$file" 2>/dev/null; then
-    return 0
+  if size=$(stat -f%z "$file" 2>/dev/null); then
+    printf '%s' "$size"
+  elif size=$(stat -c%s "$file" 2>/dev/null); then
+    printf '%s' "$size"
   else
     # Fallback to wc -c if stat doesn't work
     wc -c < "$file" | tr -d ' '
@@ -147,6 +154,10 @@ print_error() {
 cleanup() {
   if [ -n "$TEMP_DIR" ] && [ -d "$TEMP_DIR" ]; then
     rm -rf "$TEMP_DIR"
+  fi
+  # Clean up temp projects.json if it was fetched remotely
+  if [ -n "$TEMP_PROJECTS_JSON" ] && [ -f "$TEMP_PROJECTS_JSON" ]; then
+    rm -f "$TEMP_PROJECTS_JSON"
   fi
 }
 
@@ -409,12 +420,12 @@ convert_md_to_windsurf_workflow() {
     description=$(printf '%s\n' "$body" | grep -v '^#' | grep -v '^$' | head -1 | cut -c1-100)
   fi
 
-  # Check content length (Windsurf has 12000 char limit, using 11500 to leave buffer)
+  # Check content length (Windsurf has 12000 char limit)
   local content_length
   content_length=$(printf '%s' "$body" | wc -c)
-  if [ "$content_length" -gt 11500 ]; then
+  if [ "$content_length" -gt "$WINDSURF_CHAR_LIMIT" ]; then
     print_info "Warning: $md_file exceeds Windsurf 12k char limit, truncating"
-    body=$(printf '%s' "$body" | head -c 11500)
+    body=$(printf '%s' "$body" | head -c "$WINDSURF_CHAR_LIMIT")
     body="$body"$'\n\n'"[Content truncated - see original skill for full instructions]"
   fi
 
@@ -929,6 +940,7 @@ main() {
   # Check projects.json exists, fetch from GitHub if not found (for curl | bash usage)
   if [ ! -f "$PROJECTS_JSON" ]; then
     PROJECTS_JSON=$(mktemp)
+    TEMP_PROJECTS_JSON="$PROJECTS_JSON"  # Mark for cleanup on exit
     local checksum_file
     checksum_file=$(mktemp)
 
