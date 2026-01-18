@@ -53,6 +53,38 @@ cd skills-installer
 | **acp-harness** | [plaited/acp-harness](https://github.com/plaited/acp-harness) |
 | **plaited** | [plaited/plaited](https://github.com/plaited/plaited) |
 
+## Skill Scoping
+
+Skills are automatically scoped during installation to prevent naming collisions when multiple projects provide skills with the same name.
+
+**Skill folders** are renamed using the pattern: `<skill-name>@<org>_<project>`
+
+Example: `typescript-lsp` from `plaited/development-skills` becomes `typescript-lsp@plaited_development-skills`
+
+**Commands** are scoped per agent type:
+
+| Agent | Command Scoping |
+|-------|-----------------|
+| gemini | `org_project:command.toml` |
+| claude, opencode | `org_project/command.md` (folder) |
+| cursor, factory, amp, windsurf | `org_project--command.md` |
+| codex | No scoping (user-level prompts) |
+
+**Inherited skills** (already scoped from another project) preserve their original scope to prevent double-scoping.
+
+**Note:** Org and project names may contain alphanumeric characters, dots, hyphens, and underscores. Some tools using dot-notation for namespacing may interpret dots specially.
+
+### Upgrading from Unscoped Installations
+
+If you previously installed skills without scoping, run `--uninstall` first to remove unscoped skills, then reinstall:
+
+```bash
+./install.sh --uninstall --agent <agent-name>
+./install.sh --agent <agent-name>
+```
+
+This ensures a clean installation with properly scoped skill names.
+
 ## Project Details
 
 ### development-skills

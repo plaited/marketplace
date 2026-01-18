@@ -53,11 +53,11 @@ get_skills_dir() {
 get_commands_dir() {
   case "$1" in
     gemini)   echo ".gemini/commands" ;;
-    copilot)  echo ".github/commands" ;;
+    copilot)  echo "" ;;
     cursor)   echo ".cursor/commands" ;;
     opencode) echo ".opencode/command" ;;
     amp)      echo ".amp/commands" ;;
-    goose)    echo ".goose/commands" ;;
+    goose)    echo "" ;;
     factory)  echo ".factory/commands" ;;
     codex)    echo "" ;;
     windsurf) echo ".windsurf/workflows" ;;
@@ -232,11 +232,9 @@ describe("install.sh - get_skills_dir", () => {
 describe("install.sh - get_commands_dir", () => {
   const expectedMappings: Record<string, string> = {
     gemini: ".gemini/commands",
-    copilot: ".github/commands",
     cursor: ".cursor/commands",
     opencode: ".opencode/command",
     amp: ".amp/commands",
-    goose: ".goose/commands",
     factory: ".factory/commands",
     windsurf: ".windsurf/workflows", // Windsurf uses workflows
     claude: ".claude/commands",
@@ -248,6 +246,16 @@ describe("install.sh - get_commands_dir", () => {
       expect(result).toBe(expectedDir);
     });
   }
+
+  test("returns empty for copilot (no command support)", async () => {
+    const result = await callFunction("get_commands_dir", "copilot");
+    expect(result).toBe("");
+  });
+
+  test("returns empty for goose (no command support)", async () => {
+    const result = await callFunction("get_commands_dir", "goose");
+    expect(result).toBe("");
+  });
 
   test("returns empty for codex (uses prompts_dir instead)", async () => {
     const result = await callFunction("get_commands_dir", "codex");
@@ -974,5 +982,809 @@ Deploy the application to staging.
     const workflow = await convertMdToWindsurfWorkflow(md);
     expect(workflow).toContain("# Deploy Script");
     expect(workflow).toContain("1. Build the app");
+  });
+});
+
+describe("install.sh - skill scoping functions", () => {
+  // Helper to test is_scoped_skill (returns exit code 0 for true, 1 for false)
+  async function isScopedSkill(skillName: string): Promise<boolean> {
+    const script = `
+is_scoped_skill() {
+  local skill_name="$1"
+  [[ "$skill_name" =~ ^.+@[a-zA-Z0-9._-]+_[a-zA-Z0-9._-]+$ ]]
+}
+is_scoped_skill "${skillName}"
+`;
+    try {
+      await $`bash -c ${script}`.quiet();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // Helper to test extract_org_from_repo
+  async function extractOrgFromRepo(repo: string): Promise<string> {
+    const script = `
+extract_org_from_repo() {
+  local repo="$1"
+  echo "\${repo%%/*}"
+}
+extract_org_from_repo "${repo}"
+`;
+    const result = await $`bash -c ${script}`.quiet();
+    return result.text().trim();
+  }
+
+  // Helper to test get_scoped_skill_name
+  async function getScopedSkillName(skillName: string, repo: string): Promise<string> {
+    const script = `
+extract_org_from_repo() {
+  local repo="$1"
+  echo "\${repo%%/*}"
+}
+get_scoped_skill_name() {
+  local skill_name="$1"
+  local repo="$2"
+  local org project_name
+  org=$(extract_org_from_repo "$repo")
+  project_name="\${repo##*/}"
+  echo "\${skill_name}@\${org}_\${project_name}"
+}
+get_scoped_skill_name "${skillName}" "${repo}"
+`;
+    const result = await $`bash -c ${script}`.quiet();
+    return result.text().trim();
+  }
+
+  describe("is_scoped_skill", () => {
+    test("returns true for scoped skill name", async () => {
+      expect(await isScopedSkill("typescript-lsp@plaited_development-skills")).toBe(true);
+    });
+
+    test("returns true for scoped skill with dots in org", async () => {
+      expect(await isScopedSkill("my-skill@org.name_project")).toBe(true);
+    });
+
+    test("returns true for scoped skill with underscores", async () => {
+      expect(await isScopedSkill("my_skill@my_org_my_project")).toBe(true);
+    });
+
+    test("returns false for unscoped skill name", async () => {
+      expect(await isScopedSkill("typescript-lsp")).toBe(false);
+    });
+
+    test("returns false for skill name with @ but wrong format", async () => {
+      expect(await isScopedSkill("skill@invalid")).toBe(false);
+    });
+
+    test("returns false for empty string", async () => {
+      expect(await isScopedSkill("")).toBe(false);
+    });
+
+    test("returns false for skill with @ but no underscore after", async () => {
+      expect(await isScopedSkill("skill@orgproject")).toBe(false);
+    });
+  });
+
+  describe("extract_org_from_repo", () => {
+    test("extracts org from simple repo path", async () => {
+      expect(await extractOrgFromRepo("plaited/development-skills")).toBe("plaited");
+    });
+
+    test("extracts org from repo with hyphens", async () => {
+      expect(await extractOrgFromRepo("my-org/my-project")).toBe("my-org");
+    });
+
+    test("extracts org from repo with underscores", async () => {
+      expect(await extractOrgFromRepo("my_org/project_name")).toBe("my_org");
+    });
+
+    test("extracts org from repo with dots", async () => {
+      expect(await extractOrgFromRepo("org.name/project")).toBe("org.name");
+    });
+  });
+
+  describe("get_scoped_skill_name", () => {
+    test("generates scoped name for simple skill", async () => {
+      expect(await getScopedSkillName("typescript-lsp", "plaited/development-skills"))
+        .toBe("typescript-lsp@plaited_development-skills");
+    });
+
+    test("generates scoped name preserving hyphens in project", async () => {
+      expect(await getScopedSkillName("harness-skill", "plaited/acp-harness"))
+        .toBe("harness-skill@plaited_acp-harness");
+    });
+
+    test("generates scoped name for skill with underscores", async () => {
+      expect(await getScopedSkillName("my_skill", "org/project"))
+        .toBe("my_skill@org_project");
+    });
+
+    test("generates scoped name preserving dots in org", async () => {
+      expect(await getScopedSkillName("skill", "org.name/project"))
+        .toBe("skill@org.name_project");
+    });
+  });
+
+  describe("install_project scoping logic", () => {
+    // This tests the actual logic flow in install_project:
+    // - If skill is already scoped -> preserve as-is
+    // - If skill is not scoped -> add scope
+    async function simulateInstallSkill(skillName: string, repo: string): Promise<string> {
+      const script = `
+is_scoped_skill() {
+  local skill_name="$1"
+  [[ "$skill_name" =~ ^.+@[a-zA-Z0-9._-]+_[a-zA-Z0-9._-]+$ ]]
+}
+
+extract_org_from_repo() {
+  local repo="$1"
+  echo "\${repo%%/*}"
+}
+
+get_scoped_skill_name() {
+  local skill_name="$1"
+  local repo="$2"
+  local org project_name
+  org=$(extract_org_from_repo "$repo")
+  project_name="\${repo##*/}"
+  echo "\${skill_name}@\${org}_\${project_name}"
+}
+
+# Simulate install_project logic
+skill_name="${skillName}"
+repo="${repo}"
+
+if is_scoped_skill "$skill_name"; then
+  # Already scoped - would copy as-is
+  echo "$skill_name"
+else
+  # Not scoped - would rename with scope
+  get_scoped_skill_name "$skill_name" "$repo"
+fi
+`;
+      const result = await $`bash -c ${script}`.quiet();
+      return result.text().trim();
+    }
+
+    test("does not double-scope an already scoped skill", async () => {
+      // Simulating: acp-harness inherits code-documentation@plaited_development-skills
+      // When installed from acp-harness, it should NOT become:
+      // code-documentation@plaited_development-skills@plaited_acp-harness
+      const result = await simulateInstallSkill(
+        "code-documentation@plaited_development-skills",
+        "plaited/acp-harness"
+      );
+      expect(result).toBe("code-documentation@plaited_development-skills");
+      expect(result).not.toContain("@plaited_acp-harness");
+    });
+
+    test("does not double-scope inherited skill from different org", async () => {
+      const result = await simulateInstallSkill(
+        "my-skill@other-org_other-project",
+        "plaited/acp-harness"
+      );
+      expect(result).toBe("my-skill@other-org_other-project");
+    });
+
+    test("scopes an unscoped skill from the installing project", async () => {
+      // acp-harness's own skill (unscoped) should get scoped
+      const result = await simulateInstallSkill(
+        "harness-skill",
+        "plaited/acp-harness"
+      );
+      expect(result).toBe("harness-skill@plaited_acp-harness");
+    });
+
+    test("scopes simple skill name", async () => {
+      const result = await simulateInstallSkill(
+        "typescript-lsp",
+        "plaited/development-skills"
+      );
+      expect(result).toBe("typescript-lsp@plaited_development-skills");
+    });
+  });
+});
+
+describe("install.sh - skill installation integration", () => {
+  const tmpDir = join(import.meta.dir, ".test-tmp-install");
+
+  // Integration test that simulates the actual install_project skill copying behavior
+  async function testSkillInstallation(
+    sourceSkills: string[],  // skill folder names in source
+    repo: string             // repo path like "plaited/acp-harness"
+  ): Promise<string[]> {
+    const { mkdir, rm, readdir } = await import("fs/promises");
+
+    // Setup directories
+    const sourceDir = join(tmpDir, "source-skills");
+    const destDir = join(tmpDir, "dest-skills");
+    await mkdir(sourceDir, { recursive: true });
+    await mkdir(destDir, { recursive: true });
+
+    // Create source skill folders
+    for (const skill of sourceSkills) {
+      await mkdir(join(sourceDir, skill), { recursive: true });
+    }
+
+    // Run the skill installation logic (extracted from install.sh)
+    const script = `
+is_scoped_skill() {
+  local skill_name="$1"
+  [[ "$skill_name" =~ ^.+@[a-zA-Z0-9._-]+_[a-zA-Z0-9._-]+$ ]]
+}
+
+extract_org_from_repo() {
+  local repo="$1"
+  echo "\${repo%%/*}"
+}
+
+get_scoped_skill_name() {
+  local skill_name="$1"
+  local repo="$2"
+  local org project_name
+  org=$(extract_org_from_repo "$repo")
+  project_name="\${repo##*/}"
+  echo "\${skill_name}@\${org}_\${project_name}"
+}
+
+source_skills="${sourceDir}"
+skills_dir="${destDir}"
+repo="${repo}"
+
+for skill_folder in "$source_skills"/*; do
+  [ -d "$skill_folder" ] || continue
+
+  skill_name=$(basename "$skill_folder")
+
+  if is_scoped_skill "$skill_name"; then
+    # Already scoped - copy as-is (inherited skill)
+    cp -r "$skill_folder" "$skills_dir/"
+  else
+    # Not scoped - rename with scope
+    scoped_name=$(get_scoped_skill_name "$skill_name" "$repo")
+    cp -r "$skill_folder" "$skills_dir/$scoped_name"
+  fi
+done
+`;
+
+    await $`bash -c ${script}`.quiet();
+
+    // Get resulting skill folder names
+    const installed = await readdir(destDir);
+    await rm(tmpDir, { recursive: true, force: true });
+
+    return installed.sort();
+  }
+
+  test("installs both inherited scoped skills and own skills with correct names", async () => {
+    // Simulating acp-harness with:
+    // - inherited: code-documentation@plaited_development-skills
+    // - inherited: typescript-lsp@plaited_development-skills
+    // - own skill: harness-skill (should become harness-skill@plaited_acp-harness)
+    const sourceSkills = [
+      "code-documentation@plaited_development-skills",
+      "typescript-lsp@plaited_development-skills",
+      "harness-skill"
+    ];
+
+    const installed = await testSkillInstallation(sourceSkills, "plaited/acp-harness");
+
+    expect(installed).toEqual([
+      "code-documentation@plaited_development-skills",  // preserved
+      "harness-skill@plaited_acp-harness",              // scoped
+      "typescript-lsp@plaited_development-skills"       // preserved
+    ]);
+  });
+
+  test("installs all skills from a project with no inherited skills", async () => {
+    const sourceSkills = [
+      "skill-a",
+      "skill-b",
+      "skill-c"
+    ];
+
+    const installed = await testSkillInstallation(sourceSkills, "plaited/development-skills");
+
+    expect(installed).toEqual([
+      "skill-a@plaited_development-skills",
+      "skill-b@plaited_development-skills",
+      "skill-c@plaited_development-skills"
+    ]);
+  });
+
+  test("installs only inherited skills when project has no own skills", async () => {
+    const sourceSkills = [
+      "inherited-a@org_project-a",
+      "inherited-b@org_project-b"
+    ];
+
+    const installed = await testSkillInstallation(sourceSkills, "plaited/consumer-project");
+
+    expect(installed).toEqual([
+      "inherited-a@org_project-a",
+      "inherited-b@org_project-b"
+    ]);
+  });
+
+  test("handles mixed inheritance from multiple sources", async () => {
+    // Project inherits from two different sources and has own skill
+    const sourceSkills = [
+      "skill-from-dev@plaited_development-skills",
+      "skill-from-tools@acme_shared-tools",
+      "my-own-skill"
+    ];
+
+    const installed = await testSkillInstallation(sourceSkills, "plaited/my-project");
+
+    expect(installed).toEqual([
+      "my-own-skill@plaited_my-project",
+      "skill-from-dev@plaited_development-skills",
+      "skill-from-tools@acme_shared-tools"
+    ]);
+  });
+});
+
+describe("install.sh - command scoping functions", () => {
+  // Helper to test get_command_scope_prefix
+  async function getCommandScopePrefix(repo: string): Promise<string> {
+    const script = `
+extract_org_from_repo() {
+  local repo="$1"
+  echo "\${repo%%/*}"
+}
+get_command_scope_prefix() {
+  local repo="$1"
+  local org project_name
+  org=$(extract_org_from_repo "$repo")
+  project_name="\${repo##*/}"
+  echo "\${org}_\${project_name}"
+}
+get_command_scope_prefix "${repo}"
+`;
+    const result = await $`bash -c ${script}`.quiet();
+    return result.text().trim();
+  }
+
+  describe("get_command_scope_prefix", () => {
+    test("generates scope prefix for simple repo", async () => {
+      expect(await getCommandScopePrefix("plaited/development-skills"))
+        .toBe("plaited_development-skills");
+    });
+
+    test("generates scope prefix preserving hyphens", async () => {
+      expect(await getCommandScopePrefix("plaited/acp-harness"))
+        .toBe("plaited_acp-harness");
+    });
+
+    test("generates scope prefix with dots in org", async () => {
+      expect(await getCommandScopePrefix("org.name/project"))
+        .toBe("org.name_project");
+    });
+  });
+});
+
+describe("install.sh - command installation scoping", () => {
+  const tmpDir = join(import.meta.dir, ".test-tmp-commands");
+
+  // Helper to test command installation for different agents
+  async function testCommandInstallation(
+    sourceCommands: string[],  // command file names (without .md)
+    repo: string,
+    agent: string
+  ): Promise<string[]> {
+    const { mkdir, rm, readdir, writeFile } = await import("fs/promises");
+
+    // Setup directories
+    const sourceDir = join(tmpDir, "source-commands");
+    const destDir = join(tmpDir, "dest-commands");
+    await mkdir(sourceDir, { recursive: true });
+    await mkdir(destDir, { recursive: true });
+
+    // Create source command files
+    for (const cmd of sourceCommands) {
+      await writeFile(join(sourceDir, `${cmd}.md`), `# ${cmd}\nCommand content`);
+    }
+
+    // Run the command installation logic (simplified from install.sh)
+    const script = `
+extract_org_from_repo() {
+  local repo="$1"
+  echo "\${repo%%/*}"
+}
+
+get_command_scope_prefix() {
+  local repo="$1"
+  local org project_name
+  org=$(extract_org_from_repo "$repo")
+  project_name="\${repo##*/}"
+  echo "\${org}_\${project_name}"
+}
+
+source_commands="${sourceDir}"
+commands_dir="${destDir}"
+repo="${repo}"
+agent="${agent}"
+
+scope=$(get_command_scope_prefix "$repo")
+
+case "$agent" in
+  gemini)
+    for md_file in "$source_commands"/*.md; do
+      [ -f "$md_file" ] || continue
+      cmd_name=$(basename "$md_file" .md)
+      scoped_name="\${scope}:\${cmd_name}"
+      cp "$md_file" "$commands_dir/$scoped_name.toml"
+    done
+    ;;
+
+  claude|opencode)
+    scoped_dir="$commands_dir/$scope"
+    mkdir -p "$scoped_dir"
+    for md_file in "$source_commands"/*.md; do
+      [ -f "$md_file" ] || continue
+      cmd_name=$(basename "$md_file" .md)
+      cp "$md_file" "$scoped_dir/$cmd_name.md"
+    done
+    ;;
+
+  cursor|factory|amp|windsurf)
+    for md_file in "$source_commands"/*.md; do
+      [ -f "$md_file" ] || continue
+      cmd_name=$(basename "$md_file" .md)
+      scoped_name="\${scope}--\${cmd_name}"
+      cp "$md_file" "$commands_dir/$scoped_name.md"
+    done
+    ;;
+
+  codex)
+    # User-scoped, no project scoping
+    for md_file in "$source_commands"/*.md; do
+      [ -f "$md_file" ] || continue
+      cmd_name=$(basename "$md_file" .md)
+      cp "$md_file" "$commands_dir/$cmd_name.md"
+    done
+    ;;
+esac
+`;
+
+    await $`bash -c ${script}`.quiet();
+
+    // Get resulting command file/folder names (recursively for folder-based)
+    const listFilesRecursive = async (dir: string, prefix = ""): Promise<string[]> => {
+      const entries = await readdir(dir, { withFileTypes: true });
+      const results: string[] = [];
+      for (const entry of entries) {
+        const fullPath = prefix ? `${prefix}/${entry.name}` : entry.name;
+        if (entry.isDirectory()) {
+          results.push(...await listFilesRecursive(join(dir, entry.name), fullPath));
+        } else {
+          results.push(fullPath);
+        }
+      }
+      return results;
+    };
+
+    const installed = await listFilesRecursive(destDir);
+    await rm(tmpDir, { recursive: true, force: true });
+
+    return installed.sort();
+  }
+
+  test("gemini uses colon separator (scope:command.toml)", async () => {
+    const installed = await testCommandInstallation(
+      ["commit", "review"],
+      "plaited/development-skills",
+      "gemini"
+    );
+
+    expect(installed).toEqual([
+      "plaited_development-skills:commit.toml",
+      "plaited_development-skills:review.toml"
+    ]);
+  });
+
+  test("claude uses folder-based scoping (scope/command.md)", async () => {
+    const installed = await testCommandInstallation(
+      ["commit", "review"],
+      "plaited/development-skills",
+      "claude"
+    );
+
+    expect(installed).toEqual([
+      "plaited_development-skills/commit.md",
+      "plaited_development-skills/review.md"
+    ]);
+  });
+
+  test("opencode uses folder-based scoping (scope/command.md)", async () => {
+    const installed = await testCommandInstallation(
+      ["commit", "review"],
+      "plaited/acp-harness",
+      "opencode"
+    );
+
+    expect(installed).toEqual([
+      "plaited_acp-harness/commit.md",
+      "plaited_acp-harness/review.md"
+    ]);
+  });
+
+  test("cursor uses prefix with double-dash (scope--command.md)", async () => {
+    const installed = await testCommandInstallation(
+      ["commit", "review"],
+      "plaited/development-skills",
+      "cursor"
+    );
+
+    expect(installed).toEqual([
+      "plaited_development-skills--commit.md",
+      "plaited_development-skills--review.md"
+    ]);
+  });
+
+  test("factory uses prefix with double-dash (scope--command.md)", async () => {
+    const installed = await testCommandInstallation(
+      ["commit"],
+      "plaited/development-skills",
+      "factory"
+    );
+
+    expect(installed).toEqual([
+      "plaited_development-skills--commit.md"
+    ]);
+  });
+
+  test("windsurf uses prefix with double-dash (scope--workflow.md)", async () => {
+    const installed = await testCommandInstallation(
+      ["deploy", "test"],
+      "plaited/development-skills",
+      "windsurf"
+    );
+
+    expect(installed).toEqual([
+      "plaited_development-skills--deploy.md",
+      "plaited_development-skills--test.md"
+    ]);
+  });
+
+  test("codex does not scope commands (user-scoped)", async () => {
+    const installed = await testCommandInstallation(
+      ["commit", "review"],
+      "plaited/development-skills",
+      "codex"
+    );
+
+    expect(installed).toEqual([
+      "commit.md",
+      "review.md"
+    ]);
+  });
+
+  test("amp uses prefix with double-dash (scope--command.md)", async () => {
+    const installed = await testCommandInstallation(
+      ["commit"],
+      "plaited/acp-harness",
+      "amp"
+    );
+
+    expect(installed).toEqual([
+      "plaited_acp-harness--commit.md"
+    ]);
+  });
+});
+
+describe("install.sh - scoped content removal integration", () => {
+  const tmpDir = join(import.meta.dir, ".test-tmp-removal");
+
+  // Integration test for remove_project_scoped_content behavior
+  async function testScopedSkillRemoval(
+    existingSkills: string[],  // skill folder names already installed
+    scopeToRemove: string      // scope pattern like "plaited_development-skills"
+  ): Promise<string[]> {
+    const { mkdir, rm, readdir } = await import("fs/promises");
+
+    const skillsDir = join(tmpDir, "skills");
+    await mkdir(skillsDir, { recursive: true });
+
+    // Create existing skill folders
+    for (const skill of existingSkills) {
+      await mkdir(join(skillsDir, skill), { recursive: true });
+    }
+
+    // Run the removal logic (extracted from install.sh)
+    const script = `
+shopt -s nullglob
+
+skills_dir="${skillsDir}"
+scope_pattern="@${scopeToRemove}$"
+
+for skill_folder in "$skills_dir"/*; do
+  [ -d "$skill_folder" ] || continue
+  skill_name=$(basename "$skill_folder")
+  if [[ "$skill_name" =~ $scope_pattern ]]; then
+    rm -rf "$skill_folder"
+  fi
+done
+`;
+
+    await $`bash -c ${script}`.quiet();
+
+    // Get remaining skill folder names
+    const remaining = await readdir(skillsDir);
+    await rm(tmpDir, { recursive: true, force: true });
+
+    return remaining.sort();
+  }
+
+  test("removes only skills matching the scope pattern", async () => {
+    const existing = [
+      "typescript-lsp@plaited_development-skills",
+      "code-documentation@plaited_development-skills",
+      "harness-skill@plaited_acp-harness",
+      "unscoped-skill"
+    ];
+
+    const remaining = await testScopedSkillRemoval(
+      existing,
+      "plaited_development-skills"
+    );
+
+    expect(remaining).toEqual([
+      "harness-skill@plaited_acp-harness",
+      "unscoped-skill"
+    ]);
+  });
+
+  test("preserves all skills when scope doesn't match", async () => {
+    const existing = [
+      "typescript-lsp@plaited_development-skills",
+      "harness-skill@plaited_acp-harness"
+    ];
+
+    const remaining = await testScopedSkillRemoval(
+      existing,
+      "other_project"
+    );
+
+    expect(remaining).toEqual([
+      "harness-skill@plaited_acp-harness",
+      "typescript-lsp@plaited_development-skills"
+    ]);
+  });
+
+  test("handles empty skills directory gracefully", async () => {
+    const remaining = await testScopedSkillRemoval([], "plaited_development-skills");
+    expect(remaining).toEqual([]);
+  });
+
+  // Integration test for scoped command removal
+  async function testScopedCommandRemoval(
+    existingCommands: string[],  // command file names
+    scopeToRemove: string,       // scope like "plaited_development-skills"
+    agent: string                // agent type
+  ): Promise<string[]> {
+    const { mkdir, rm, readdir, writeFile } = await import("fs/promises");
+
+    const commandsDir = join(tmpDir, "commands");
+    await mkdir(commandsDir, { recursive: true });
+
+    // Create existing command files
+    for (const cmd of existingCommands) {
+      if (cmd.includes("/")) {
+        // Folder-based command
+        const folder = cmd.split("/")[0];
+        await mkdir(join(commandsDir, folder), { recursive: true });
+        await writeFile(join(commandsDir, cmd), "test");
+      } else {
+        await writeFile(join(commandsDir, cmd), "test");
+      }
+    }
+
+    // Run the removal logic (extracted from install.sh)
+    const script = `
+shopt -s nullglob
+
+remove_matching_files() {
+  local pattern="$1"
+  local dir="$2"
+  for cmd_file in "$dir"/$pattern; do
+    [ -f "$cmd_file" ] || continue
+    rm -f "$cmd_file"
+  done
+}
+
+commands_dir="${commandsDir}"
+scope="${scopeToRemove}"
+agent="${agent}"
+
+case "$agent" in
+  gemini)
+    remove_matching_files "\${scope}:*.toml" "$commands_dir"
+    ;;
+  claude|opencode)
+    if [ -d "$commands_dir/$scope" ]; then
+      rm -rf "$commands_dir/$scope"
+    fi
+    ;;
+  cursor|factory|amp|windsurf)
+    remove_matching_files "\${scope}--*.md" "$commands_dir"
+    ;;
+esac
+`;
+
+    await $`bash -c ${script}`.quiet();
+
+    // Get remaining files (recursively for folder-based)
+    const remaining: string[] = [];
+    const entries = await readdir(commandsDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        const subEntries = await readdir(join(commandsDir, entry.name));
+        for (const sub of subEntries) {
+          remaining.push(`${entry.name}/${sub}`);
+        }
+      } else {
+        remaining.push(entry.name);
+      }
+    }
+    await rm(tmpDir, { recursive: true, force: true });
+
+    return remaining.sort();
+  }
+
+  test("removes gemini commands matching scope pattern", async () => {
+    const existing = [
+      "plaited_development-skills:commit.toml",
+      "plaited_development-skills:review.toml",
+      "plaited_acp-harness:test.toml"
+    ];
+
+    const remaining = await testScopedCommandRemoval(
+      existing,
+      "plaited_development-skills",
+      "gemini"
+    );
+
+    expect(remaining).toEqual([
+      "plaited_acp-harness:test.toml"
+    ]);
+  });
+
+  test("removes claude folder-based commands", async () => {
+    const existing = [
+      "plaited_development-skills/commit.md",
+      "plaited_development-skills/review.md",
+      "plaited_acp-harness/test.md"
+    ];
+
+    const remaining = await testScopedCommandRemoval(
+      existing,
+      "plaited_development-skills",
+      "claude"
+    );
+
+    expect(remaining).toEqual([
+      "plaited_acp-harness/test.md"
+    ]);
+  });
+
+  test("removes cursor prefix-based commands", async () => {
+    const existing = [
+      "plaited_development-skills--commit.md",
+      "plaited_development-skills--review.md",
+      "plaited_acp-harness--test.md"
+    ];
+
+    const remaining = await testScopedCommandRemoval(
+      existing,
+      "plaited_development-skills",
+      "cursor"
+    );
+
+    expect(remaining).toEqual([
+      "plaited_acp-harness--test.md"
+    ]);
   });
 });
