@@ -38,8 +38,9 @@ get_file_size() {
   elif size=$(stat -c%s "$file" 2>/dev/null); then
     printf '%s' "$size"
   else
-    # Fallback to wc -c if stat doesn't work
-    wc -c < "$file" | tr -d ' '
+    # Fallback to ls -ln (doesn't read file content, parses metadata)
+    # Format: -rw-r--r-- 1 uid gid SIZE date time file
+    ls -ln "$file" 2>/dev/null | awk '{print $5}'
   fi
 }
 
@@ -123,9 +124,20 @@ trap cleanup EXIT
 # Projects JSON Parsing (jq with awk fallback)
 # ============================================================================
 
+# Track if we've shown the jq fallback message
+JQ_FALLBACK_WARNED=""
+
 # Check if jq is available
 has_jq() {
   command -v jq >/dev/null 2>&1
+}
+
+# Show one-time info message when falling back to awk
+warn_jq_fallback() {
+  if [ -z "$JQ_FALLBACK_WARNED" ]; then
+    JQ_FALLBACK_WARNED="1"
+    print_info "jq not found, using awk fallback for JSON parsing"
+  fi
 }
 
 # Get all project names from projects.json
@@ -133,6 +145,7 @@ get_project_names() {
   if has_jq; then
     jq -r '.projects[].name' "$PROJECTS_JSON"
   else
+    warn_jq_fallback
     # Fallback: parse with awk
     awk '
       /"projects"[[:space:]]*:/ { in_projects=1 }
@@ -151,9 +164,10 @@ get_project_repo() {
   if has_jq; then
     jq -r --arg name "$project_name" '.projects[] | select(.name == $name) | .repo' "$PROJECTS_JSON"
   else
-    # Fallback: parse with awk
+    warn_jq_fallback
+    # Fallback: parse with awk (use awk variable consistently)
     awk -v name="$project_name" '
-      /"name"[[:space:]]*:[[:space:]]*"'"$project_name"'"/ { found=1 }
+      $0 ~ "\"name\"[[:space:]]*:[[:space:]]*\"" name "\"" { found=1 }
       found && /"repo"[[:space:]]*:/ {
         gsub(/.*"repo"[[:space:]]*:[[:space:]]*"/, "")
         gsub(/".*/, "")

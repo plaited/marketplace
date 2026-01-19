@@ -1,3 +1,21 @@
+/**
+ * Plaited Skills Installer Test Suite
+ *
+ * Test coverage:
+ * - projects.json validation and parsing
+ * - Agent directory mappings (get_skills_dir)
+ * - Source parsing and security validation
+ * - JSON parsing (jq with awk fallback)
+ * - Skill scoping functions (is_scoped_skill, get_scoped_skill_name)
+ * - Skill installation integration
+ * - Scoped content removal
+ * - CLI argument parsing
+ * - README consistency
+ * - Edge cases and error handling
+ *
+ * Run with: bun test
+ */
+
 import { describe, test, expect, beforeAll } from "bun:test";
 import { $ } from "bun";
 import { readFile } from "fs/promises";
@@ -1017,7 +1035,7 @@ done
 
       const script = `
 is_scoped_skill() {
-  [[ "$1" =~ ^.+@[a-zA-Z0-9._-]+_[a-zA-Z0-9._-]+$ ]]
+  [[ "$1" =~ ^[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+_[a-zA-Z0-9._-]+$ ]]
 }
 extract_org_from_repo() { echo "\${1%%/*}"; }
 get_scoped_skill_name() {
@@ -1360,5 +1378,92 @@ if has_jq; then echo "jq-available"; else echo "jq-not-available"; fi
         expect(output).toBe("jq-not-available");
       }
     });
+  });
+});
+
+describe("install.sh - checksum verification", () => {
+  const tmpDir = join(import.meta.dir, ".test-tmp-checksum");
+
+  test("checksum mismatch is detected", async () => {
+    const { mkdir, writeFile, rm } = await import("fs/promises");
+    await mkdir(tmpDir, { recursive: true });
+
+    // Create a test projects.json
+    const testProjectsJson = join(tmpDir, "projects.json");
+    const testChecksumFile = join(tmpDir, "projects.json.sha256");
+
+    await writeFile(testProjectsJson, '{"projects":[{"name":"test","repo":"org/repo"}]}');
+    // Write an incorrect checksum
+    await writeFile(testChecksumFile, "0000000000000000000000000000000000000000000000000000000000000000  projects.json");
+
+    // Simulate checksum verification logic
+    const script = `
+set -e
+print_error() { echo "ERROR: $1" >&2; }
+
+PROJECTS_JSON="${testProjectsJson}"
+checksum_file="${testChecksumFile}"
+
+expected_checksum=$(awk '{print $1}' "$checksum_file")
+actual_checksum=$(shasum -a 256 "$PROJECTS_JSON" 2>/dev/null | awk '{print $1}')
+
+if [ "$expected_checksum" != "$actual_checksum" ]; then
+  echo "CHECKSUM_MISMATCH"
+  exit 1
+else
+  echo "CHECKSUM_OK"
+fi
+`;
+
+    try {
+      await $`bash -c ${script}`.quiet();
+      // Should not reach here
+      expect(true).toBe(false);
+    } catch (error: unknown) {
+      const err = error as { stdout?: { toString(): string }; exitCode?: number };
+      expect(err.stdout?.toString()).toContain("CHECKSUM_MISMATCH");
+      expect(err.exitCode).toBe(1);
+    }
+
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  test("valid checksum passes verification", async () => {
+    const { mkdir, writeFile, rm } = await import("fs/promises");
+    await mkdir(tmpDir, { recursive: true });
+
+    // Create a test projects.json
+    const testProjectsJson = join(tmpDir, "projects.json");
+    const testChecksumFile = join(tmpDir, "projects.json.sha256");
+    const content = '{"projects":[{"name":"test","repo":"org/repo"}]}';
+
+    await writeFile(testProjectsJson, content);
+
+    // Generate correct checksum
+    const checksumResult = await $`shasum -a 256 ${testProjectsJson}`.quiet();
+    const checksum = checksumResult.text().split(" ")[0];
+    await writeFile(testChecksumFile, `${checksum}  projects.json`);
+
+    // Simulate checksum verification logic
+    const script = `
+set -e
+PROJECTS_JSON="${testProjectsJson}"
+checksum_file="${testChecksumFile}"
+
+expected_checksum=$(awk '{print $1}' "$checksum_file")
+actual_checksum=$(shasum -a 256 "$PROJECTS_JSON" 2>/dev/null | awk '{print $1}')
+
+if [ "$expected_checksum" != "$actual_checksum" ]; then
+  echo "CHECKSUM_MISMATCH"
+  exit 1
+else
+  echo "CHECKSUM_OK"
+fi
+`;
+
+    const result = await $`bash -c ${script}`.quiet();
+    expect(result.text().trim()).toBe("CHECKSUM_OK");
+
+    await rm(tmpDir, { recursive: true, force: true });
   });
 });
