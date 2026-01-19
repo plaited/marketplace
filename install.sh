@@ -3,12 +3,12 @@
 # Supports: Gemini CLI, GitHub Copilot, Cursor, OpenCode, Amp, Goose, Factory, Codex, Windsurf, Claude Code
 #
 # Usage:
-#   ./install.sh                         # Interactive: asks which agent
-#   ./install.sh --agent gemini          # Direct: install for Gemini CLI
+#   ./install.sh                              # Interactive: asks which agent
+#   ./install.sh --agent gemini               # Direct: install for Gemini CLI
 #   ./install.sh --project development-skills # Install specific project only
-#   ./install.sh --list                  # List available projects
-#   ./install.sh --update                # Update existing installation
-#   ./install.sh --uninstall             # Remove installation
+#   ./install.sh --list                       # List available projects
+#   ./install.sh --update                     # Update existing installation
+#   ./install.sh --uninstall                  # Remove installation
 
 set -e
 
@@ -24,9 +24,6 @@ TEMP_PROJECTS_JSON=""  # Track if projects.json is a temp file that needs cleanu
 
 # Security: Maximum file size for reading (100KB) to prevent resource exhaustion
 MAX_FILE_SIZE=102400
-
-# Windsurf workflow character limit (12000 with 500 char buffer for truncation message)
-WINDSURF_CHAR_LIMIT=11500
 
 # Safely read file contents with size limit check
 # Get file size using stat (more efficient than wc -c as it doesn't read the file)
@@ -85,49 +82,6 @@ get_skills_dir() {
   esac
 }
 
-get_commands_dir() {
-  case "$1" in
-    gemini)   echo ".gemini/commands" ;;
-    copilot)  echo "" ;;                   # Copilot doesn't support commands
-    cursor)   echo ".cursor/commands" ;;
-    opencode) echo ".opencode/command" ;;  # OpenCode uses 'command' (singular)
-    amp)      echo ".amp/commands" ;;
-    goose)    echo "" ;;                   # Goose doesn't support commands
-    factory)  echo ".factory/commands" ;;
-    codex)    echo "" ;;                   # Codex uses ~/.codex/prompts/ (user-scoped)
-    windsurf) echo ".windsurf/workflows" ;; # Windsurf uses workflows, not commands
-    claude)   echo ".claude/commands" ;;
-    *)        echo "" ;;
-  esac
-}
-
-# Get the prompts directory for agents that use user-scoped prompts
-# Note: Codex uses a global ~/.codex/prompts directory (user-scoped, not project-local).
-# This means all Codex projects share the same prompts. This is intentional as Codex
-# custom prompts are designed to be user-level, not project-level. See Codex docs for details.
-get_prompts_dir() {
-  case "$1" in
-    codex) echo "$HOME/.codex/prompts" ;;
-    *)     echo "" ;;
-  esac
-}
-
-supports_commands() {
-  # Agents that support slash commands (native or converted)
-  case "$1" in
-    gemini|cursor|opencode|amp|factory|claude) return 0 ;;
-    codex|windsurf) return 0 ;;  # Supported via conversion
-    *) return 1 ;;
-  esac
-}
-
-# Check if agent needs command format conversion
-needs_command_conversion() {
-  case "$1" in
-    gemini|codex|windsurf) return 0 ;;
-    *) return 1 ;;
-  esac
-}
 
 # ============================================================================
 # Helper Functions
@@ -166,32 +120,48 @@ cleanup() {
 trap cleanup EXIT
 
 # ============================================================================
-# Projects JSON Parsing
+# Projects JSON Parsing (jq with awk fallback)
 # ============================================================================
 
-# Parse projects.json without jq (for broader compatibility)
-get_project_names() {
-  awk '
-    /"projects"[[:space:]]*:/ { in_projects=1 }
-    in_projects && /"name"[[:space:]]*:/ {
-      gsub(/.*"name"[[:space:]]*:[[:space:]]*"/, "")
-      gsub(/".*/, "")
-      print
-    }
-  ' "$PROJECTS_JSON"
+# Check if jq is available
+has_jq() {
+  command -v jq >/dev/null 2>&1
 }
 
+# Get all project names from projects.json
+get_project_names() {
+  if has_jq; then
+    jq -r '.projects[].name' "$PROJECTS_JSON"
+  else
+    # Fallback: parse with awk
+    awk '
+      /"projects"[[:space:]]*:/ { in_projects=1 }
+      in_projects && /"name"[[:space:]]*:/ {
+        gsub(/.*"name"[[:space:]]*:[[:space:]]*"/, "")
+        gsub(/".*/, "")
+        print
+      }
+    ' "$PROJECTS_JSON"
+  fi
+}
+
+# Get repository path for a project
 get_project_repo() {
   local project_name="$1"
-  awk -v name="$project_name" '
-    /"name"[[:space:]]*:[[:space:]]*"'"$project_name"'"/ { found=1 }
-    found && /"repo"[[:space:]]*:/ {
-      gsub(/.*"repo"[[:space:]]*:[[:space:]]*"/, "")
-      gsub(/".*/, "")
-      print
-      exit
-    }
-  ' "$PROJECTS_JSON"
+  if has_jq; then
+    jq -r --arg name "$project_name" '.projects[] | select(.name == $name) | .repo' "$PROJECTS_JSON"
+  else
+    # Fallback: parse with awk
+    awk -v name="$project_name" '
+      /"name"[[:space:]]*:[[:space:]]*"'"$project_name"'"/ { found=1 }
+      found && /"repo"[[:space:]]*:/ {
+        gsub(/.*"repo"[[:space:]]*:[[:space:]]*"/, "")
+        gsub(/".*/, "")
+        print
+        exit
+      }
+    ' "$PROJECTS_JSON"
+  fi
 }
 
 # Parse source repo like "plaited/development-skills"
@@ -219,9 +189,10 @@ parse_source() {
 # ============================================================================
 
 # Check if a skill folder is already scoped (has @org_project suffix)
+# Pattern: skill-name@org_project where all parts are alphanumeric with dots, hyphens, underscores
 is_scoped_skill() {
   local skill_name="$1"
-  [[ "$skill_name" =~ ^.+@[a-zA-Z0-9._-]+_[a-zA-Z0-9._-]+$ ]]
+  [[ "$skill_name" =~ ^[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+_[a-zA-Z0-9._-]+$ ]]
 }
 
 # Validate scope component doesn't contain path traversal sequences
@@ -261,8 +232,8 @@ get_scoped_skill_name() {
   echo "${skill_name}@${org}_${project_name}"
 }
 
-# Generate command scope prefix from repo: org_project
-get_command_scope_prefix() {
+# Generate scope prefix from repo: org_project
+get_skill_scope_prefix() {
   local repo="$1"
   local org project_name
   org=$(extract_org_from_repo "$repo")
@@ -275,67 +246,14 @@ get_command_scope_prefix() {
   echo "${org}_${project_name}"
 }
 
-# Helper to safely remove files matching a glob pattern
-# Uses nullglob to handle no-match case properly
-remove_matching_files() {
-  local pattern="$1"
-  local dir="$2"
-  (
-    shopt -s nullglob
-    for cmd_file in "$dir"/$pattern; do
-      [ -f "$cmd_file" ] || continue
-      rm -f "$cmd_file"
-      print_info "Removed command: $(basename "$cmd_file")"
-    done
-  )
-}
 
-# Remove scoped commands for a project based on agent type
-remove_scoped_commands() {
-  local agent="$1"
-  local scope="$2"
-  local commands_dir="$3"
-
-  [ -d "$commands_dir" ] || return 0
-
-  case "$agent" in
-    gemini)
-      # Remove scope:*.toml files
-      remove_matching_files "${scope}:*.toml" "$commands_dir"
-      ;;
-
-    claude|opencode)
-      # Remove scope/ folder
-      if [ -d "$commands_dir/$scope" ]; then
-        rm -rf "$commands_dir/$scope"
-        print_info "Removed commands folder: $scope/"
-      fi
-      ;;
-
-    cursor|factory|amp|windsurf)
-      # Remove scope--*.md files
-      remove_matching_files "${scope}--*.md" "$commands_dir"
-      ;;
-
-    codex)
-      # User-scoped prompts - don't remove on project uninstall
-      ;;
-
-    *)
-      # Fallback: remove scope--*.md files
-      remove_matching_files "${scope}--*.md" "$commands_dir"
-      ;;
-  esac
-}
-
-# Remove all scoped skills and commands for a project
+# Remove all scoped skills for a project
 # Used by both update and uninstall operations
 # Echoes the count of removed skills to stdout
 remove_project_scoped_content() {
   local agent="$1"
   local project_name="$2"
   local skills_dir="$3"
-  local commands_dir="$4"
   local removed=0
 
   local repo
@@ -346,9 +264,9 @@ remove_project_scoped_content() {
     return 0
   fi
 
-  # Reuse get_command_scope_prefix for scope calculation
+  # Calculate scope for this project
   local scope scope_pattern
-  if ! scope=$(get_command_scope_prefix "$repo"); then
+  if ! scope=$(get_skill_scope_prefix "$repo"); then
     print_info "Could not generate scope for project: $project_name, skipping removal"
     echo "0"
     return 0
@@ -369,255 +287,9 @@ remove_project_scoped_content() {
     done
   fi
 
-  # Remove scoped commands
-  if [ -n "$commands_dir" ]; then
-    remove_scoped_commands "$agent" "$scope" "$commands_dir"
-  fi
-
   echo "$removed"
 }
 
-# ============================================================================
-# Format Conversion
-# ============================================================================
-#
-# Conversion Algorithm Overview:
-# -----------------------------
-# Different AI agents expect commands/prompts in different formats.
-# These functions convert from the standard agent-skills-spec markdown format
-# to each agent's native format.
-#
-# Source format (agent-skills-spec):
-#   - Markdown file with optional YAML frontmatter (---)
-#   - Frontmatter may contain: name, description, allowed-tools
-#   - Body contains the prompt/command instructions
-#   - May use $ARGUMENTS placeholder for user input
-#
-# Target formats:
-#   1. Gemini TOML: description + prompt fields in TOML syntax
-#   2. Codex prompt: Markdown with description/argument-hint frontmatter
-#   3. Windsurf workflow: Structured markdown with title, description, steps
-#
-# Security considerations:
-#   - All file reads go through safe_read_file() with size limits
-#   - No shell expansion of file content (uses printf, not echo)
-#   - AWK patterns are static, not user-controlled
-# ============================================================================
-
-# Shared frontmatter extraction helpers (reduces code duplication)
-
-# Check if file has YAML frontmatter (starts with ---)
-has_frontmatter() {
-  local file="$1"
-  if [ ! -f "$file" ]; then
-    return 1
-  fi
-  head -1 "$file" 2>/dev/null | grep -q '^---$'
-}
-
-# Extract a field from YAML frontmatter
-# Usage: extract_frontmatter_field "file.md" "description"
-# Returns: field value on stdout, exit code 0 on success
-# Note: Returns empty string (not error) if field not found - this is intentional
-extract_frontmatter_field() {
-  local file="$1"
-  local field="$2"
-  local strip_quotes="${3:-true}"
-
-  if [ ! -f "$file" ]; then
-    print_error "File not found: $file"
-    return 1
-  fi
-
-  local result
-  if ! result=$(awk -v field="$field" -v strip="$strip_quotes" '
-    /^---$/ { if (in_front) exit; in_front=1; next }
-    in_front && $0 ~ "^" field ":" {
-      sub("^" field ":[[:space:]]*", "")
-      if (strip == "true") {
-        gsub(/^["'"'"']|["'"'"']$/, "")
-      }
-      print
-      exit
-    }
-  ' "$file" 2>&1); then
-    print_error "AWK parsing failed for $file: $result"
-    return 1
-  fi
-
-  printf '%s' "$result"
-}
-
-# Extract body content (everything after YAML frontmatter)
-# Returns: body content on stdout, exit code 0 on success
-extract_body() {
-  local file="$1"
-
-  if [ ! -f "$file" ]; then
-    print_error "File not found: $file"
-    return 1
-  fi
-
-  # Run AWK directly to preserve output formatting (including newlines)
-  awk '
-    /^---$/ { count++; if (count == 2) { getbody=1; next } }
-    getbody { print }
-  ' "$file"
-}
-
-# Convert markdown command to Gemini TOML format
-convert_md_to_toml() {
-  local md_file="$1"
-  local toml_file="$2"
-
-  # Extract description from YAML frontmatter (escape quotes for TOML)
-  local description
-  description=$(extract_frontmatter_field "$md_file" "description" "false" | sed 's/"/\\"/g')
-
-  # Get body (everything after second ---)
-  local body
-  body=$(extract_body "$md_file")
-
-  # Replace $ARGUMENTS with {{args}}
-  # Use printf instead of echo to safely handle arbitrary input (avoids command injection)
-  body=$(printf '%s\n' "$body" | sed 's/\$ARGUMENTS/{{args}}/g')
-
-  # Write TOML file
-  {
-    if [ -n "$description" ]; then
-      echo "description = \"$description\""
-      echo ""
-    fi
-    echo "prompt = \"\"\""
-    echo "$body"
-    echo "\"\"\""
-  } > "$toml_file"
-}
-
-# Convert markdown command to Codex custom prompt format
-# Input: plain markdown or markdown with YAML frontmatter
-# Output: markdown with required YAML frontmatter (description, argument-hint)
-convert_md_to_codex_prompt() {
-  local md_file="$1"
-  local prompt_file="$2"
-
-  local description=""
-  local body=""
-
-  if has_frontmatter "$md_file"; then
-    # Extract existing description using shared helper
-    description=$(extract_frontmatter_field "$md_file" "description")
-    # Get body using shared helper
-    body=$(extract_body "$md_file")
-  else
-    # No frontmatter - use filename as basis for description
-    local basename
-    basename=$(basename "$md_file" .md)
-    description=$(echo "$basename" | tr '-' ' ' | sed 's/\b\(.\)/\u\1/g')
-    if ! body=$(safe_read_file "$md_file"); then
-      return 1
-    fi
-  fi
-
-  # If still no description, extract from first line of body
-  if [ -z "$description" ]; then
-    description=$(printf '%s\n' "$body" | head -1 | sed 's/^#* *//' | cut -c1-80)
-  fi
-
-  # Detect if command uses arguments (look for placeholders like $1, $FILE, etc.)
-  local argument_hint=""
-  if printf '%s\n' "$body" | grep -qE '\$[0-9]|\$[A-Z_]+'; then
-    # Extract named placeholders
-    local placeholders
-    placeholders=$(printf '%s\n' "$body" | grep -oE '\$[A-Z_]+' | sort -u | tr '\n' ' ')
-    if [ -n "$placeholders" ]; then
-      argument_hint=$(echo "$placeholders" | sed 's/\$\([A-Z_]*\)/\1=<value>/g' | tr -s ' ')
-    fi
-  fi
-
-  # Write Codex prompt file with frontmatter
-  {
-    echo "---"
-    echo "description: $description"
-    if [ -n "$argument_hint" ]; then
-      echo "argument-hint: $argument_hint"
-    fi
-    echo "---"
-    echo ""
-    echo "$body"
-  } > "$prompt_file"
-}
-
-# Convert markdown command to Windsurf workflow format
-# Input: plain markdown or markdown with YAML frontmatter
-# Output: markdown structured as workflow (title, description, numbered steps)
-convert_md_to_windsurf_workflow() {
-  local md_file="$1"
-  local workflow_file="$2"
-
-  local name=""
-  local description=""
-  local body=""
-
-  if has_frontmatter "$md_file"; then
-    # Extract name and description using shared helpers
-    name=$(extract_frontmatter_field "$md_file" "name")
-    description=$(extract_frontmatter_field "$md_file" "description")
-    # Get body using shared helper
-    body=$(extract_body "$md_file")
-  else
-    # No frontmatter - derive from filename
-    local basename
-    basename=$(basename "$md_file" .md)
-    name=$(echo "$basename" | tr '-' ' ' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2))}1')
-    if ! body=$(safe_read_file "$md_file"); then
-      return 1
-    fi
-  fi
-
-  # If still no name, extract from first heading
-  if [ -z "$name" ]; then
-    name=$(printf '%s\n' "$body" | grep -m1 '^#' | sed 's/^#* *//')
-  fi
-
-  # If still no description, use first non-heading line
-  if [ -z "$description" ]; then
-    description=$(printf '%s\n' "$body" | grep -v '^#' | grep -v '^$' | head -1 | cut -c1-100)
-  fi
-
-  # Check content length (Windsurf has 12000 char limit)
-  local content_length
-  content_length=$(printf '%s' "$body" | wc -c)
-  if [ "$content_length" -gt "$WINDSURF_CHAR_LIMIT" ]; then
-    print_info "Warning: $md_file exceeds Windsurf 12k char limit, truncating"
-    body=$(printf '%s' "$body" | head -c "$WINDSURF_CHAR_LIMIT")
-    body="$body"$'\n\n'"[Content truncated - see original skill for full instructions]"
-  fi
-
-  # Check if body already has numbered steps structure
-  local has_steps
-  has_steps=$(printf '%s\n' "$body" | grep -cE '^[0-9]+\.' || true)
-
-  # Write Windsurf workflow file
-  {
-    echo "# $name"
-    echo ""
-    if [ -n "$description" ]; then
-      echo "$description"
-      echo ""
-    fi
-
-    if [ "$has_steps" -gt 0 ]; then
-      # Already has numbered steps, use as-is
-      echo "$body"
-    else
-      # Wrap content as workflow instructions
-      echo "## Instructions"
-      echo ""
-      echo "$body"
-    fi
-  } > "$workflow_file"
-}
 
 # ============================================================================
 # Agent Detection
@@ -721,9 +393,9 @@ clone_project() {
     return 1
   }
 
-  # Fetch both skills and commands directories
+  # Fetch skills directory
   local sparse_output
-  if ! sparse_output=$(git sparse-checkout set "$sparse_path/skills" "$sparse_path/commands" 2>&1); then
+  if ! sparse_output=$(git sparse-checkout set "$sparse_path/skills" 2>&1); then
     print_error "Failed to set sparse checkout for $project_name"
     print_error "Git error: $sparse_output"
     cd - > /dev/null
@@ -741,17 +413,14 @@ clone_project() {
 install_project() {
   local project_name="$1"
   local skills_dir="$2"
-  local commands_dir="$3"
-  local agent="$4"
 
   local project_temp="$TEMP_DIR/$project_name"
   local sparse_path
   sparse_path=$(cat "$project_temp/.sparse_path")
 
   local source_skills="$project_temp/$sparse_path/skills"
-  local source_commands="$project_temp/$sparse_path/commands"
 
-  # Get repo once for both skills and commands scoping
+  # Get repo for skill scoping
   local repo
   repo=$(get_project_repo "$project_name")
   if [ -z "$repo" ]; then
@@ -788,105 +457,6 @@ install_project() {
   else
     print_info "No skills directory in $project_name ($sparse_path/skills)"
   fi
-
-  if [ -d "$source_commands" ]; then
-    print_info "Installing commands from $project_name..."
-
-    local scope
-    if ! scope=$(get_command_scope_prefix "$repo"); then
-      print_error "  Skipping commands: invalid scope components"
-    elif [ -z "$commands_dir" ]; then
-      # Skip if agent doesn't support commands
-      print_info "Agent $agent does not support commands, skipping..."
-    else
-      case "$agent" in
-        gemini)
-          # Convert .md to .toml for Gemini CLI (scope:command.toml)
-          mkdir -p "$commands_dir"
-          for md_file in "$source_commands"/*.md; do
-            [ -f "$md_file" ] || continue
-            local cmd_name
-            cmd_name=$(basename "$md_file" .md)
-            local scoped_name="${scope}:${cmd_name}"
-            convert_md_to_toml "$md_file" "$commands_dir/$scoped_name.toml"
-            print_info "  Installed: /$scoped_name"
-          done
-          print_success "Converted and installed $project_name commands (TOML)"
-          ;;
-
-        codex)
-          # Convert to Codex custom prompts (user-scoped, no project scoping)
-          local prompts_dir
-          prompts_dir=$(get_prompts_dir "$agent")
-          mkdir -p "$prompts_dir"
-          for md_file in "$source_commands"/*.md; do
-            [ -f "$md_file" ] || continue
-            local cmd_name
-            cmd_name=$(basename "$md_file" .md)
-            convert_md_to_codex_prompt "$md_file" "$prompts_dir/$cmd_name.md"
-            print_info "  Installed: $cmd_name"
-          done
-          print_success "Converted and installed $project_name prompts → $prompts_dir/"
-          ;;
-
-        windsurf)
-          # Convert to Windsurf workflows (scope--workflow.md)
-          mkdir -p "$commands_dir"
-          for md_file in "$source_commands"/*.md; do
-            [ -f "$md_file" ] || continue
-            local cmd_name
-            cmd_name=$(basename "$md_file" .md)
-            local scoped_name="${scope}--${cmd_name}"
-            convert_md_to_windsurf_workflow "$md_file" "$commands_dir/$scoped_name.md"
-            print_info "  Installed: /$scoped_name"
-          done
-          print_success "Converted and installed $project_name workflows"
-          ;;
-
-        claude|opencode)
-          # Folder-based scoping for Claude/OpenCode (scope/command.md)
-          local scoped_dir="$commands_dir/$scope"
-          mkdir -p "$scoped_dir"
-          for md_file in "$source_commands"/*.md; do
-            [ -f "$md_file" ] || continue
-            local cmd_name
-            cmd_name=$(basename "$md_file" .md)
-            cp "$md_file" "$scoped_dir/$cmd_name.md"
-            print_info "  Installed: /$scope/$cmd_name"
-          done
-          print_success "Installed $project_name commands"
-          ;;
-
-        cursor|factory|amp)
-          # Flat structure with prefix (scope--command.md)
-          mkdir -p "$commands_dir"
-          for md_file in "$source_commands"/*.md; do
-            [ -f "$md_file" ] || continue
-            local cmd_name
-            cmd_name=$(basename "$md_file" .md)
-            local scoped_name="${scope}--${cmd_name}"
-            cp "$md_file" "$commands_dir/$scoped_name.md"
-            print_info "  Installed: /$scoped_name"
-          done
-          print_success "Installed $project_name commands"
-          ;;
-
-        *)
-          # Fallback: direct copy with prefix for unknown agents
-          mkdir -p "$commands_dir"
-          for md_file in "$source_commands"/*.md; do
-            [ -f "$md_file" ] || continue
-            local cmd_name
-            cmd_name=$(basename "$md_file" .md)
-            local scoped_name="${scope}--${cmd_name}"
-            cp "$md_file" "$commands_dir/$scoped_name.md"
-            print_info "  Installed: /$scoped_name"
-          done
-          print_success "Installed $project_name commands"
-          ;;
-      esac
-    fi
-  fi
 }
 
 # ============================================================================
@@ -897,20 +467,13 @@ do_install() {
   local agent="$1"
   local specific_project="$2"
   local skills_dir_override="$3"
-  local commands_dir_override="$4"
 
-  local skills_dir commands_dir
-  # Use overrides if provided, otherwise get from agent
+  local skills_dir
+  # Use override if provided, otherwise get from agent
   if [ -n "$skills_dir_override" ]; then
     skills_dir="$skills_dir_override"
   else
     skills_dir=$(get_skills_dir "$agent")
-  fi
-
-  if [ -n "$commands_dir_override" ]; then
-    commands_dir="$commands_dir_override"
-  else
-    commands_dir=$(get_commands_dir "$agent")
   fi
 
   if [ -z "$skills_dir" ]; then
@@ -920,16 +483,10 @@ do_install() {
 
   print_info "Installing for: $agent"
   print_info "Skills: $skills_dir/"
-  if [ -n "$commands_dir" ]; then
-    print_info "Commands: $commands_dir/"
-  fi
   echo ""
 
   TEMP_DIR=$(mktemp -d)
   mkdir -p "$skills_dir"
-  if [ -n "$commands_dir" ]; then
-    mkdir -p "$commands_dir"
-  fi
 
   local projects_installed=0
 
@@ -954,7 +511,7 @@ do_install() {
     if ! clone_project "$project_name" "$source"; then
       continue
     fi
-    install_project "$project_name" "$skills_dir" "$commands_dir" "$agent"
+    install_project "$project_name" "$skills_dir"
     projects_installed=$((projects_installed + 1))
   done
 
@@ -975,39 +532,11 @@ do_install() {
   echo "  Agent: $agent"
   echo "  Projects installed: $projects_installed"
   echo ""
-  echo "  Locations:"
-  echo "    • Skills:   $skills_dir/"
-
-  # Show commands/prompts/workflows location based on agent
-  case "$agent" in
-    codex)
-      local prompts_dir
-      prompts_dir=$(get_prompts_dir "$agent")
-      if [ -d "$prompts_dir" ] && [ "$(ls -A "$prompts_dir" 2>/dev/null)" ]; then
-        echo "    • Prompts:  $prompts_dir/ (converted from commands)"
-      fi
-      ;;
-    windsurf)
-      if [ -d "$commands_dir" ] && [ "$(ls -A "$commands_dir" 2>/dev/null)" ]; then
-        echo "    • Workflows: $commands_dir/ (converted from commands)"
-      fi
-      ;;
-    *)
-      if supports_commands "$agent" && [ -d "$commands_dir" ] && [ "$(ls -A "$commands_dir" 2>/dev/null)" ]; then
-        echo "    • Commands: $commands_dir/"
-      fi
-      ;;
-  esac
-
+  echo "  Location: $skills_dir/"
   echo ""
   echo "  Next steps:"
   echo "    1. Restart your AI coding agent to load the new skills"
   echo "    2. Skills are auto-discovered and activated when relevant"
-  if [ "$agent" = "codex" ]; then
-    echo "    3. Prompts are invoked via /prompts:<name> in Codex"
-  elif [ "$agent" = "windsurf" ]; then
-    echo "    3. Workflows are invoked via /<workflow-name> in Cascade"
-  fi
   echo ""
 }
 
@@ -1041,7 +570,6 @@ do_update() {
   local agent="$1"
   local specific_project="$2"
   local skills_dir_override="$3"
-  local commands_dir_override="$4"
 
   # Use provided agent or detect from existing installation
   if [ -z "$agent" ]; then
@@ -1055,18 +583,12 @@ do_update() {
 
   print_info "Updating installation for: $agent"
 
-  local skills_dir commands_dir
-  # Use overrides if provided, otherwise get from agent
+  local skills_dir
+  # Use override if provided, otherwise get from agent
   if [ -n "$skills_dir_override" ]; then
     skills_dir="$skills_dir_override"
   else
     skills_dir=$(get_skills_dir "$agent")
-  fi
-
-  if [ -n "$commands_dir_override" ]; then
-    commands_dir="$commands_dir_override"
-  else
-    commands_dir=$(get_commands_dir "$agent")
   fi
 
   # Get all project names and remove their skill directories
@@ -1077,11 +599,11 @@ do_update() {
     if [ -n "$specific_project" ] && [ "$project_name" != "$specific_project" ]; then
       continue
     fi
-    remove_project_scoped_content "$agent" "$project_name" "$skills_dir" "$commands_dir"
+    remove_project_scoped_content "$agent" "$project_name" "$skills_dir"
   done
 
   # Reinstall
-  do_install "$agent" "$specific_project" "$skills_dir_override" "$commands_dir_override"
+  do_install "$agent" "$specific_project" "$skills_dir_override"
 }
 
 # ============================================================================
@@ -1092,7 +614,6 @@ do_uninstall() {
   local agent="$1"
   local specific_project="$2"
   local skills_dir_override="$3"
-  local commands_dir_override="$4"
 
   # Use provided agent or detect from existing installation
   if [ -z "$agent" ]; then
@@ -1106,18 +627,12 @@ do_uninstall() {
 
   print_info "Uninstalling for: $agent"
 
-  local skills_dir commands_dir
-  # Use overrides if provided, otherwise get from agent
+  local skills_dir
+  # Use override if provided, otherwise get from agent
   if [ -n "$skills_dir_override" ]; then
     skills_dir="$skills_dir_override"
   else
     skills_dir=$(get_skills_dir "$agent")
-  fi
-
-  if [ -n "$commands_dir_override" ]; then
-    commands_dir="$commands_dir_override"
-  else
-    commands_dir=$(get_commands_dir "$agent")
   fi
 
   local project_names
@@ -1129,7 +644,7 @@ do_uninstall() {
       continue
     fi
     local count
-    count=$(remove_project_scoped_content "$agent" "$project_name" "$skills_dir" "$commands_dir")
+    count=$(remove_project_scoped_content "$agent" "$project_name" "$skills_dir")
     removed=$((removed + count))
   done
 
@@ -1154,7 +669,6 @@ show_help() {
   echo "  --agent <name>       Install for specific agent"
   echo "  --project <name>     Install specific project only"
   echo "  --skills-dir <path>  Override skills directory"
-  echo "  --commands-dir <path> Override commands directory"
   echo "  --list               List available projects"
   echo "  --update             Update existing installation"
   echo "  --uninstall          Remove installation"
@@ -1162,20 +676,20 @@ show_help() {
   echo ""
   echo "Supported Agents:"
   echo ""
-  echo "  ┌──────────────┬──────────────────────┬────────────────────────────┐"
-  echo "  │ Agent        │ Skills               │ Commands                   │"
-  echo "  ├──────────────┼──────────────────────┼────────────────────────────┤"
-  echo "  │ gemini       │ .gemini/skills       │ .gemini/commands (→TOML)   │"
-  echo "  │ copilot      │ .github/skills       │ -                          │"
-  echo "  │ cursor       │ .cursor/skills       │ .cursor/commands           │"
-  echo "  │ opencode     │ .opencode/skill      │ .opencode/command          │"
-  echo "  │ amp          │ .amp/skills          │ .amp/commands              │"
-  echo "  │ goose        │ .goose/skills        │ -                          │"
-  echo "  │ factory      │ .factory/skills      │ .factory/commands          │"
-  echo "  │ codex        │ .codex/skills        │ ~/.codex/prompts (→prompt) │"
-  echo "  │ windsurf     │ .windsurf/skills     │ .windsurf/workflows        │"
-  echo "  │ claude       │ .claude/skills       │ .claude/commands           │"
-  echo "  └──────────────┴──────────────────────┴────────────────────────────┘"
+  echo "  ┌──────────────┬──────────────────────┐"
+  echo "  │ Agent        │ Skills Directory     │"
+  echo "  ├──────────────┼──────────────────────┤"
+  echo "  │ gemini       │ .gemini/skills       │"
+  echo "  │ copilot      │ .github/skills       │"
+  echo "  │ cursor       │ .cursor/skills       │"
+  echo "  │ opencode     │ .opencode/skill      │"
+  echo "  │ amp          │ .amp/skills          │"
+  echo "  │ goose        │ .goose/skills        │"
+  echo "  │ factory      │ .factory/skills      │"
+  echo "  │ codex        │ .codex/skills        │"
+  echo "  │ windsurf     │ .windsurf/skills     │"
+  echo "  │ claude       │ .claude/skills       │"
+  echo "  └──────────────┴──────────────────────┘"
   echo ""
   echo "Examples:"
   echo "  ./install.sh                              # Interactive mode"
@@ -1190,7 +704,6 @@ main() {
   local agent=""
   local project=""
   local skills_dir_override=""
-  local commands_dir_override=""
   local action="install"
 
   while [ $# -gt 0 ]; do
@@ -1205,10 +718,6 @@ main() {
         ;;
       --skills-dir)
         skills_dir_override="$2"
-        shift 2
-        ;;
-      --commands-dir)
-        commands_dir_override="$2"
         shift 2
         ;;
       --list)
@@ -1292,7 +801,7 @@ main() {
         agent=$(ask_agent)
       fi
 
-      # Validate agent (unless custom dirs provided)
+      # Validate agent (unless custom dir provided)
       if [ -z "$skills_dir_override" ]; then
         local skills_dir
         skills_dir=$(get_skills_dir "$agent")
@@ -1303,13 +812,13 @@ main() {
         fi
       fi
 
-      do_install "$agent" "$project" "$skills_dir_override" "$commands_dir_override"
+      do_install "$agent" "$project" "$skills_dir_override"
       ;;
     update)
-      do_update "$agent" "$project" "$skills_dir_override" "$commands_dir_override"
+      do_update "$agent" "$project" "$skills_dir_override"
       ;;
     uninstall)
-      do_uninstall "$agent" "$project" "$skills_dir_override" "$commands_dir_override"
+      do_uninstall "$agent" "$project" "$skills_dir_override"
       ;;
   esac
 }

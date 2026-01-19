@@ -50,44 +50,6 @@ get_skills_dir() {
   esac
 }
 
-get_commands_dir() {
-  case "$1" in
-    gemini)   echo ".gemini/commands" ;;
-    copilot)  echo "" ;;
-    cursor)   echo ".cursor/commands" ;;
-    opencode) echo ".opencode/command" ;;
-    amp)      echo ".amp/commands" ;;
-    goose)    echo "" ;;
-    factory)  echo ".factory/commands" ;;
-    codex)    echo "" ;;
-    windsurf) echo ".windsurf/workflows" ;;
-    claude)   echo ".claude/commands" ;;
-    *)        echo "" ;;
-  esac
-}
-
-get_prompts_dir() {
-  case "$1" in
-    codex) echo "$HOME/.codex/prompts" ;;
-    *)     echo "" ;;
-  esac
-}
-
-supports_commands() {
-  case "$1" in
-    gemini|cursor|opencode|amp|factory|claude) return 0 ;;
-    codex|windsurf) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-needs_command_conversion() {
-  case "$1" in
-    gemini|codex|windsurf) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
 parse_source() {
   local repo="$1"
   echo "https://github.com/$repo.git" ".claude"
@@ -123,36 +85,6 @@ ${fn} ${quotedArgs}
   return result.text().trim();
 }
 
-// Helper to check if function returns success (0) or failure (1)
-async function callFunctionExitCode(
-  fn: string,
-  ...args: string[]
-): Promise<number> {
-  const quotedArgs = args.map((a) => `"${a}"`).join(" ");
-  const script = `
-supports_commands() {
-  case "$1" in
-    gemini|cursor|opencode|amp|factory|claude) return 0 ;;
-    codex|windsurf) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-needs_command_conversion() {
-  case "$1" in
-    gemini|codex|windsurf) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-${fn} ${quotedArgs}
-  `;
-  try {
-    await $`bash -c ${script}`.quiet();
-    return 0;
-  } catch {
-    return 1;
-  }
-}
 
 describe("projects.json", () => {
   let projects: {
@@ -227,107 +159,6 @@ describe("install.sh - get_skills_dir", () => {
     const result = await callFunction("get_skills_dir", "unknown");
     expect(result).toBe("");
   });
-});
-
-describe("install.sh - get_commands_dir", () => {
-  const expectedMappings: Record<string, string> = {
-    gemini: ".gemini/commands",
-    cursor: ".cursor/commands",
-    opencode: ".opencode/command",
-    amp: ".amp/commands",
-    factory: ".factory/commands",
-    windsurf: ".windsurf/workflows", // Windsurf uses workflows
-    claude: ".claude/commands",
-  };
-
-  for (const [agent, expectedDir] of Object.entries(expectedMappings)) {
-    test(`returns correct dir for ${agent}`, async () => {
-      const result = await callFunction("get_commands_dir", agent);
-      expect(result).toBe(expectedDir);
-    });
-  }
-
-  test("returns empty for copilot (no command support)", async () => {
-    const result = await callFunction("get_commands_dir", "copilot");
-    expect(result).toBe("");
-  });
-
-  test("returns empty for goose (no command support)", async () => {
-    const result = await callFunction("get_commands_dir", "goose");
-    expect(result).toBe("");
-  });
-
-  test("returns empty for codex (uses prompts_dir instead)", async () => {
-    const result = await callFunction("get_commands_dir", "codex");
-    expect(result).toBe("");
-  });
-
-  test("returns empty for unknown agent", async () => {
-    const result = await callFunction("get_commands_dir", "unknown");
-    expect(result).toBe("");
-  });
-});
-
-describe("install.sh - get_prompts_dir", () => {
-  test("returns ~/.codex/prompts for codex", async () => {
-    const result = await callFunction("get_prompts_dir", "codex");
-    expect(result).toContain(".codex/prompts");
-  });
-
-  test("returns empty for other agents", async () => {
-    const agents = ["gemini", "cursor", "windsurf", "copilot"];
-    for (const agent of agents) {
-      const result = await callFunction("get_prompts_dir", agent);
-      expect(result).toBe("");
-    }
-  });
-});
-
-describe("install.sh - supports_commands", () => {
-  const supportsCommands = [
-    "gemini",
-    "cursor",
-    "opencode",
-    "amp",
-    "factory",
-    "codex",
-    "windsurf",
-    "claude",
-  ];
-  const doesNotSupportCommands = ["copilot", "goose"];
-
-  for (const agent of supportsCommands) {
-    test(`${agent} supports commands`, async () => {
-      const exitCode = await callFunctionExitCode("supports_commands", agent);
-      expect(exitCode).toBe(0);
-    });
-  }
-
-  for (const agent of doesNotSupportCommands) {
-    test(`${agent} does not support commands`, async () => {
-      const exitCode = await callFunctionExitCode("supports_commands", agent);
-      expect(exitCode).toBe(1);
-    });
-  }
-});
-
-describe("install.sh - needs_command_conversion", () => {
-  const needsConversion = ["gemini", "codex", "windsurf"];
-  const noConversion = ["cursor", "opencode", "amp", "factory", "copilot", "goose", "claude"];
-
-  for (const agent of needsConversion) {
-    test(`${agent} needs command conversion`, async () => {
-      const exitCode = await callFunctionExitCode("needs_command_conversion", agent);
-      expect(exitCode).toBe(0);
-    });
-  }
-
-  for (const agent of noConversion) {
-    test(`${agent} does not need command conversion`, async () => {
-      const exitCode = await callFunctionExitCode("needs_command_conversion", agent);
-      expect(exitCode).toBe(1);
-    });
-  }
 });
 
 describe("install.sh - parse_source", () => {
@@ -564,426 +395,6 @@ describe("README.md consistency", () => {
   });
 });
 
-describe("install.sh - convert_md_to_toml", () => {
-  const tmpDir = join(import.meta.dir, ".test-tmp");
-
-  // Helper to run convert_md_to_toml
-  async function convertMdToToml(
-    mdContent: string
-  ): Promise<string> {
-    const { mkdir, writeFile, readFile, rm } = await import("fs/promises");
-    await mkdir(tmpDir, { recursive: true });
-
-    const mdPath = join(tmpDir, "test-command.md");
-    const tomlPath = join(tmpDir, "test-command.toml");
-    const scriptPath = join(tmpDir, "run-convert.sh");
-
-    await writeFile(mdPath, mdContent);
-
-    // Write script to temp file to avoid escaping issues
-    const script = `#!/bin/bash
-convert_md_to_toml() {
-  local md_file="$1"
-  local toml_file="$2"
-
-  local description
-  description=$(awk '
-    /^---$/ { if (in_front) exit; in_front=1; next }
-    in_front && /^description:/ {
-      sub(/^description:[[:space:]]*/, "")
-      gsub(/"/, "\\\\\\"")
-      print
-      exit
-    }
-  ' "$md_file")
-
-  local body
-  body=$(awk '
-    /^---$/ { count++; if (count == 2) { getbody=1; next } }
-    getbody { print }
-  ' "$md_file")
-
-  body=$(printf '%s\\n' "$body" | sed 's/\\$ARGUMENTS/{{args}}/g')
-
-  {
-    if [ -n "$description" ]; then
-      echo "description = \\"$description\\""
-      echo ""
-    fi
-    echo 'prompt = """'
-    echo "$body"
-    echo '"""'
-  } > "$toml_file"
-}
-
-convert_md_to_toml "${mdPath}" "${tomlPath}"
-`;
-
-    await writeFile(scriptPath, script);
-
-    await $`bash ${scriptPath}`.quiet();
-
-    const result = await readFile(tomlPath, "utf-8");
-    await rm(tmpDir, { recursive: true, force: true });
-    return result;
-  }
-
-  test("converts basic markdown with description", async () => {
-    const md = `---
-description: Test description
-allowed-tools: Bash
----
-
-# Test Command
-
-This is the body.
-`;
-
-    const toml = await convertMdToToml(md);
-    expect(toml).toContain('description = "Test description"');
-    expect(toml).toContain('prompt = """');
-    expect(toml).toContain("# Test Command");
-    expect(toml).toContain("This is the body.");
-    expect(toml).toContain('"""');
-    // allowed-tools should be dropped (not in output)
-    expect(toml).not.toContain("allowed-tools");
-    expect(toml).not.toContain("Bash");
-  });
-
-  test("replaces $ARGUMENTS with {{args}}", async () => {
-    const md = `---
-description: Command with args
----
-
-Use $ARGUMENTS here and $ARGUMENTS again.
-`;
-
-    const toml = await convertMdToToml(md);
-    expect(toml).toContain("{{args}}");
-    expect(toml).not.toContain("$ARGUMENTS");
-    // Should have two replacements
-    const matches = toml.match(/\{\{args\}\}/g);
-    expect(matches?.length).toBe(2);
-  });
-
-  test("handles markdown without description", async () => {
-    const md = `---
-allowed-tools: Bash
----
-
-# No Description
-
-Just a body.
-`;
-
-    const toml = await convertMdToToml(md);
-    expect(toml).not.toContain("description =");
-    expect(toml).toContain('prompt = """');
-    expect(toml).toContain("# No Description");
-  });
-
-  test("escapes quotes in description", async () => {
-    const md = `---
-description: A "quoted" description
----
-
-Body text.
-`;
-
-    const toml = await convertMdToToml(md);
-    expect(toml).toContain('description = "A \\"quoted\\" description"');
-  });
-});
-
-describe("install.sh - supports_commands updated", () => {
-  test("gemini now supports commands", async () => {
-    const exitCode = await callFunctionExitCode("supports_commands", "gemini");
-    expect(exitCode).toBe(0);
-  });
-});
-
-describe("install.sh - convert_md_to_codex_prompt", () => {
-  const tmpDir = join(import.meta.dir, ".test-tmp-codex");
-
-  // Helper to run convert_md_to_codex_prompt
-  async function convertMdToCodexPrompt(mdContent: string): Promise<string> {
-    const { mkdir, writeFile, readFile, rm } = await import("fs/promises");
-    await mkdir(tmpDir, { recursive: true });
-
-    const mdPath = join(tmpDir, "test-command.md");
-    const promptPath = join(tmpDir, "test-command-prompt.md");
-    const scriptPath = join(tmpDir, "run-test.sh");
-
-    await writeFile(mdPath, mdContent);
-
-    // Create wrapper script that extracts and runs the function
-    const script = `#!/bin/bash
-set -e
-# Define print_error stub and safe_read_file helper
-print_error() { echo "✗ $1" >&2; }
-MAX_FILE_SIZE=102400
-safe_read_file() {
-  local file="$1"
-  local max_size="\${2:-$MAX_FILE_SIZE}"
-  if [ ! -f "$file" ]; then return 1; fi
-  local file_size; file_size=$(wc -c < "$file")
-  if [ "$file_size" -gt "$max_size" ]; then print_error "File exceeds size limit"; return 1; fi
-  cat "$file"
-}
-
-# Define shared frontmatter helpers
-has_frontmatter() {
-  local file="$1"
-  if [ ! -f "$file" ]; then return 1; fi
-  head -1 "$file" 2>/dev/null | grep -q '^---$'
-}
-
-extract_frontmatter_field() {
-  local file="$1"
-  local field="$2"
-  local strip_quotes="\${3:-true}"
-  if [ ! -f "$file" ]; then return 1; fi
-  awk -v field="$field" -v strip="$strip_quotes" '
-    /^---$/ { if (in_front) exit; in_front=1; next }
-    in_front && $0 ~ "^" field ":" {
-      sub("^" field ":[[:space:]]*", "")
-      if (strip == "true") { gsub(/^["'"'"']|["'"'"']$/, "") }
-      print
-      exit
-    }
-  ' "$file"
-}
-
-extract_body() {
-  local file="$1"
-  if [ ! -f "$file" ]; then return 1; fi
-  awk '
-    /^---$/ { count++; if (count == 2) { getbody=1; next } }
-    getbody { print }
-  ' "$file"
-}
-
-# Extract convert_md_to_codex_prompt function from install.sh
-eval "$(sed -n '/^convert_md_to_codex_prompt()/,/^}/p' '${INSTALL_SCRIPT}')"
-convert_md_to_codex_prompt '${mdPath}' '${promptPath}'
-`;
-    await writeFile(scriptPath, script);
-    await $`bash ${scriptPath}`.quiet();
-
-    const output = await readFile(promptPath, "utf-8");
-    await rm(tmpDir, { recursive: true, force: true });
-    return output;
-  }
-
-  test("converts markdown with frontmatter to codex prompt", async () => {
-    const md = `---
-description: Review code for issues
----
-
-Review the provided code for bugs and security issues.
-`;
-
-    const prompt = await convertMdToCodexPrompt(md);
-    expect(prompt).toContain("---");
-    expect(prompt).toContain("description: Review code for issues");
-    expect(prompt).toContain("Review the provided code");
-  });
-
-  test("extracts description from body when not in frontmatter", async () => {
-    const md = `---
-allowed-tools: Bash
----
-
-# Code Review Helper
-
-Review the code.
-`;
-
-    const prompt = await convertMdToCodexPrompt(md);
-    expect(prompt).toContain("description:");
-    expect(prompt).toContain("Code Review Helper");
-  });
-
-  test("detects placeholders and creates argument-hint", async () => {
-    const md = `---
-description: Process files
----
-
-Process $FILE with options $OPTIONS.
-`;
-
-    const prompt = await convertMdToCodexPrompt(md);
-    expect(prompt).toContain("argument-hint:");
-    expect(prompt).toMatch(/FILE=<value>/);
-    expect(prompt).toMatch(/OPTIONS=<value>/);
-  });
-
-  test("handles plain markdown without frontmatter", async () => {
-    const md = `# Simple Command
-
-Just do the thing.
-`;
-
-    const prompt = await convertMdToCodexPrompt(md);
-    expect(prompt).toContain("---");
-    expect(prompt).toContain("description:");
-    expect(prompt).toContain("Just do the thing");
-  });
-});
-
-describe("install.sh - convert_md_to_windsurf_workflow", () => {
-  const tmpDir = join(import.meta.dir, ".test-tmp-windsurf");
-
-  // Helper to run convert_md_to_windsurf_workflow
-  async function convertMdToWindsurfWorkflow(mdContent: string): Promise<string> {
-    const { mkdir, writeFile, readFile, rm } = await import("fs/promises");
-    await mkdir(tmpDir, { recursive: true });
-
-    const mdPath = join(tmpDir, "test-command.md");
-    const workflowPath = join(tmpDir, "test-workflow.md");
-    const scriptPath = join(tmpDir, "run-test.sh");
-
-    await writeFile(mdPath, mdContent);
-
-    // Create wrapper script that extracts and runs the function
-    const script = `#!/bin/bash
-set -e
-# Define print_info, print_error stubs and safe_read_file helper
-print_info() { echo "→ $1"; }
-print_error() { echo "✗ $1" >&2; }
-MAX_FILE_SIZE=102400
-safe_read_file() {
-  local file="$1"
-  local max_size="\${2:-$MAX_FILE_SIZE}"
-  if [ ! -f "$file" ]; then return 1; fi
-  local file_size; file_size=$(wc -c < "$file")
-  if [ "$file_size" -gt "$max_size" ]; then print_error "File exceeds size limit"; return 1; fi
-  cat "$file"
-}
-
-# Define shared frontmatter helpers
-has_frontmatter() {
-  local file="$1"
-  if [ ! -f "$file" ]; then return 1; fi
-  head -1 "$file" 2>/dev/null | grep -q '^---$'
-}
-
-extract_frontmatter_field() {
-  local file="$1"
-  local field="$2"
-  local strip_quotes="\${3:-true}"
-  if [ ! -f "$file" ]; then return 1; fi
-  awk -v field="$field" -v strip="$strip_quotes" '
-    /^---$/ { if (in_front) exit; in_front=1; next }
-    in_front && $0 ~ "^" field ":" {
-      sub("^" field ":[[:space:]]*", "")
-      if (strip == "true") { gsub(/^["'"'"']|["'"'"']$/, "") }
-      print
-      exit
-    }
-  ' "$file"
-}
-
-extract_body() {
-  local file="$1"
-  if [ ! -f "$file" ]; then return 1; fi
-  awk '
-    /^---$/ { count++; if (count == 2) { getbody=1; next } }
-    getbody { print }
-  ' "$file"
-}
-
-# Extract convert_md_to_windsurf_workflow function from install.sh
-eval "$(sed -n '/^convert_md_to_windsurf_workflow()/,/^}/p' '${INSTALL_SCRIPT}')"
-convert_md_to_windsurf_workflow '${mdPath}' '${workflowPath}'
-`;
-    await writeFile(scriptPath, script);
-    await $`bash ${scriptPath}`.quiet();
-
-    const result = await readFile(workflowPath, "utf-8");
-    await rm(tmpDir, { recursive: true, force: true });
-    return result;
-  }
-
-  test("converts markdown with frontmatter to workflow", async () => {
-    const md = `---
-name: Code Review
-description: Review code for issues
----
-
-1. Check for bugs
-2. Check for security issues
-3. Report findings
-`;
-
-    const workflow = await convertMdToWindsurfWorkflow(md);
-    expect(workflow).toContain("# Code Review");
-    expect(workflow).toContain("Review code for issues");
-    expect(workflow).toContain("1. Check for bugs");
-  });
-
-  test("extracts name from heading when not in frontmatter", async () => {
-    const md = `---
-description: A helpful workflow
----
-
-# My Custom Workflow
-
-Do the thing.
-`;
-
-    const workflow = await convertMdToWindsurfWorkflow(md);
-    expect(workflow).toContain("# My Custom Workflow");
-    expect(workflow).toContain("A helpful workflow");
-  });
-
-  test("wraps content in Instructions section when no numbered steps", async () => {
-    const md = `---
-name: Simple Task
-description: Do something simple
----
-
-Just follow these instructions to complete the task.
-Make sure to be careful.
-`;
-
-    const workflow = await convertMdToWindsurfWorkflow(md);
-    expect(workflow).toContain("# Simple Task");
-    expect(workflow).toContain("## Instructions");
-    expect(workflow).toContain("Just follow these instructions");
-  });
-
-  test("preserves numbered steps without wrapping", async () => {
-    const md = `---
-name: Numbered Steps
-description: Steps workflow
----
-
-1. First step
-2. Second step
-3. Third step
-`;
-
-    const workflow = await convertMdToWindsurfWorkflow(md);
-    expect(workflow).toContain("1. First step");
-    expect(workflow).not.toContain("## Instructions");
-  });
-
-  test("handles plain markdown without frontmatter", async () => {
-    const md = `# Deploy Script
-
-Deploy the application to staging.
-
-1. Build the app
-2. Run tests
-3. Deploy to staging
-`;
-
-    const workflow = await convertMdToWindsurfWorkflow(md);
-    expect(workflow).toContain("# Deploy Script");
-    expect(workflow).toContain("1. Build the app");
-  });
-});
 
 describe("install.sh - skill scoping functions", () => {
   // Helper to test is_scoped_skill (returns exit code 0 for true, 1 for false)
@@ -991,7 +402,7 @@ describe("install.sh - skill scoping functions", () => {
     const script = `
 is_scoped_skill() {
   local skill_name="$1"
-  [[ "$skill_name" =~ ^.+@[a-zA-Z0-9._-]+_[a-zA-Z0-9._-]+$ ]]
+  [[ "$skill_name" =~ ^[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+_[a-zA-Z0-9._-]+$ ]]
 }
 is_scoped_skill "${skillName}"
 `;
@@ -1115,7 +526,7 @@ get_scoped_skill_name "${skillName}" "${repo}"
       const script = `
 is_scoped_skill() {
   local skill_name="$1"
-  [[ "$skill_name" =~ ^.+@[a-zA-Z0-9._-]+_[a-zA-Z0-9._-]+$ ]]
+  [[ "$skill_name" =~ ^[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+_[a-zA-Z0-9._-]+$ ]]
 }
 
 extract_org_from_repo() {
@@ -1212,7 +623,7 @@ describe("install.sh - skill installation integration", () => {
     const script = `
 is_scoped_skill() {
   local skill_name="$1"
-  [[ "$skill_name" =~ ^.+@[a-zA-Z0-9._-]+_[a-zA-Z0-9._-]+$ ]]
+  [[ "$skill_name" =~ ^[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+_[a-zA-Z0-9._-]+$ ]]
 }
 
 extract_org_from_repo() {
@@ -1326,254 +737,6 @@ done
   });
 });
 
-describe("install.sh - command scoping functions", () => {
-  // Helper to test get_command_scope_prefix
-  async function getCommandScopePrefix(repo: string): Promise<string> {
-    const script = `
-extract_org_from_repo() {
-  local repo="$1"
-  echo "\${repo%%/*}"
-}
-get_command_scope_prefix() {
-  local repo="$1"
-  local org project_name
-  org=$(extract_org_from_repo "$repo")
-  project_name="\${repo##*/}"
-  echo "\${org}_\${project_name}"
-}
-get_command_scope_prefix "${repo}"
-`;
-    const result = await $`bash -c ${script}`.quiet();
-    return result.text().trim();
-  }
-
-  describe("get_command_scope_prefix", () => {
-    test("generates scope prefix for simple repo", async () => {
-      expect(await getCommandScopePrefix("plaited/development-skills"))
-        .toBe("plaited_development-skills");
-    });
-
-    test("generates scope prefix preserving hyphens", async () => {
-      expect(await getCommandScopePrefix("plaited/acp-harness"))
-        .toBe("plaited_acp-harness");
-    });
-
-    test("generates scope prefix with dots in org", async () => {
-      expect(await getCommandScopePrefix("org.name/project"))
-        .toBe("org.name_project");
-    });
-  });
-});
-
-describe("install.sh - command installation scoping", () => {
-  const tmpDir = join(import.meta.dir, ".test-tmp-commands");
-
-  // Helper to test command installation for different agents
-  async function testCommandInstallation(
-    sourceCommands: string[],  // command file names (without .md)
-    repo: string,
-    agent: string
-  ): Promise<string[]> {
-    const { mkdir, rm, readdir, writeFile } = await import("fs/promises");
-
-    // Setup directories
-    const sourceDir = join(tmpDir, "source-commands");
-    const destDir = join(tmpDir, "dest-commands");
-    await mkdir(sourceDir, { recursive: true });
-    await mkdir(destDir, { recursive: true });
-
-    // Create source command files
-    for (const cmd of sourceCommands) {
-      await writeFile(join(sourceDir, `${cmd}.md`), `# ${cmd}\nCommand content`);
-    }
-
-    // Run the command installation logic (simplified from install.sh)
-    const script = `
-extract_org_from_repo() {
-  local repo="$1"
-  echo "\${repo%%/*}"
-}
-
-get_command_scope_prefix() {
-  local repo="$1"
-  local org project_name
-  org=$(extract_org_from_repo "$repo")
-  project_name="\${repo##*/}"
-  echo "\${org}_\${project_name}"
-}
-
-source_commands="${sourceDir}"
-commands_dir="${destDir}"
-repo="${repo}"
-agent="${agent}"
-
-scope=$(get_command_scope_prefix "$repo")
-
-case "$agent" in
-  gemini)
-    for md_file in "$source_commands"/*.md; do
-      [ -f "$md_file" ] || continue
-      cmd_name=$(basename "$md_file" .md)
-      scoped_name="\${scope}:\${cmd_name}"
-      cp "$md_file" "$commands_dir/$scoped_name.toml"
-    done
-    ;;
-
-  claude|opencode)
-    scoped_dir="$commands_dir/$scope"
-    mkdir -p "$scoped_dir"
-    for md_file in "$source_commands"/*.md; do
-      [ -f "$md_file" ] || continue
-      cmd_name=$(basename "$md_file" .md)
-      cp "$md_file" "$scoped_dir/$cmd_name.md"
-    done
-    ;;
-
-  cursor|factory|amp|windsurf)
-    for md_file in "$source_commands"/*.md; do
-      [ -f "$md_file" ] || continue
-      cmd_name=$(basename "$md_file" .md)
-      scoped_name="\${scope}--\${cmd_name}"
-      cp "$md_file" "$commands_dir/$scoped_name.md"
-    done
-    ;;
-
-  codex)
-    # User-scoped, no project scoping
-    for md_file in "$source_commands"/*.md; do
-      [ -f "$md_file" ] || continue
-      cmd_name=$(basename "$md_file" .md)
-      cp "$md_file" "$commands_dir/$cmd_name.md"
-    done
-    ;;
-esac
-`;
-
-    await $`bash -c ${script}`.quiet();
-
-    // Get resulting command file/folder names (recursively for folder-based)
-    const listFilesRecursive = async (dir: string, prefix = ""): Promise<string[]> => {
-      const entries = await readdir(dir, { withFileTypes: true });
-      const results: string[] = [];
-      for (const entry of entries) {
-        const fullPath = prefix ? `${prefix}/${entry.name}` : entry.name;
-        if (entry.isDirectory()) {
-          results.push(...await listFilesRecursive(join(dir, entry.name), fullPath));
-        } else {
-          results.push(fullPath);
-        }
-      }
-      return results;
-    };
-
-    const installed = await listFilesRecursive(destDir);
-    await rm(tmpDir, { recursive: true, force: true });
-
-    return installed.sort();
-  }
-
-  test("gemini uses colon separator (scope:command.toml)", async () => {
-    const installed = await testCommandInstallation(
-      ["commit", "review"],
-      "plaited/development-skills",
-      "gemini"
-    );
-
-    expect(installed).toEqual([
-      "plaited_development-skills:commit.toml",
-      "plaited_development-skills:review.toml"
-    ]);
-  });
-
-  test("claude uses folder-based scoping (scope/command.md)", async () => {
-    const installed = await testCommandInstallation(
-      ["commit", "review"],
-      "plaited/development-skills",
-      "claude"
-    );
-
-    expect(installed).toEqual([
-      "plaited_development-skills/commit.md",
-      "plaited_development-skills/review.md"
-    ]);
-  });
-
-  test("opencode uses folder-based scoping (scope/command.md)", async () => {
-    const installed = await testCommandInstallation(
-      ["commit", "review"],
-      "plaited/acp-harness",
-      "opencode"
-    );
-
-    expect(installed).toEqual([
-      "plaited_acp-harness/commit.md",
-      "plaited_acp-harness/review.md"
-    ]);
-  });
-
-  test("cursor uses prefix with double-dash (scope--command.md)", async () => {
-    const installed = await testCommandInstallation(
-      ["commit", "review"],
-      "plaited/development-skills",
-      "cursor"
-    );
-
-    expect(installed).toEqual([
-      "plaited_development-skills--commit.md",
-      "plaited_development-skills--review.md"
-    ]);
-  });
-
-  test("factory uses prefix with double-dash (scope--command.md)", async () => {
-    const installed = await testCommandInstallation(
-      ["commit"],
-      "plaited/development-skills",
-      "factory"
-    );
-
-    expect(installed).toEqual([
-      "plaited_development-skills--commit.md"
-    ]);
-  });
-
-  test("windsurf uses prefix with double-dash (scope--workflow.md)", async () => {
-    const installed = await testCommandInstallation(
-      ["deploy", "test"],
-      "plaited/development-skills",
-      "windsurf"
-    );
-
-    expect(installed).toEqual([
-      "plaited_development-skills--deploy.md",
-      "plaited_development-skills--test.md"
-    ]);
-  });
-
-  test("codex does not scope commands (user-scoped)", async () => {
-    const installed = await testCommandInstallation(
-      ["commit", "review"],
-      "plaited/development-skills",
-      "codex"
-    );
-
-    expect(installed).toEqual([
-      "commit.md",
-      "review.md"
-    ]);
-  });
-
-  test("amp uses prefix with double-dash (scope--command.md)", async () => {
-    const installed = await testCommandInstallation(
-      ["commit"],
-      "plaited/acp-harness",
-      "amp"
-    );
-
-    expect(installed).toEqual([
-      "plaited_acp-harness--commit.md"
-    ]);
-  });
-});
 
 describe("install.sh - scoped content removal integration", () => {
   const tmpDir = join(import.meta.dir, ".test-tmp-removal");
@@ -1658,133 +821,544 @@ done
     const remaining = await testScopedSkillRemoval([], "plaited_development-skills");
     expect(remaining).toEqual([]);
   });
+});
 
-  // Integration test for scoped command removal
-  async function testScopedCommandRemoval(
-    existingCommands: string[],  // command file names
-    scopeToRemove: string,       // scope like "plaited_development-skills"
-    agent: string                // agent type
-  ): Promise<string[]> {
-    const { mkdir, rm, readdir, writeFile } = await import("fs/promises");
+describe("install.sh - edge cases", () => {
+  const tmpDir = join(import.meta.dir, ".test-tmp-edge");
 
-    const commandsDir = join(tmpDir, "commands");
-    await mkdir(commandsDir, { recursive: true });
+  describe("skills-dir override", () => {
+    test("--skills-dir accepts custom path", async () => {
+      const { mkdir, rm, readdir } = await import("fs/promises");
+      const customDir = join(tmpDir, "custom-skills");
+      await mkdir(customDir, { recursive: true });
 
-    // Create existing command files
-    for (const cmd of existingCommands) {
-      if (cmd.includes("/")) {
-        // Folder-based command
-        const folder = cmd.split("/")[0];
-        await mkdir(join(commandsDir, folder), { recursive: true });
-        await writeFile(join(commandsDir, cmd), "test");
-      } else {
-        await writeFile(join(commandsDir, cmd), "test");
+      // The help should mention --skills-dir
+      const helpResult = await $`bash ${INSTALL_SCRIPT} --help`.quiet();
+      expect(helpResult.text()).toContain("--skills-dir");
+
+      await rm(tmpDir, { recursive: true, force: true });
+    });
+  });
+
+  describe("skill scoping edge cases", () => {
+    async function testScopedName(skillName: string, repo: string): Promise<string> {
+      const script = `
+extract_org_from_repo() {
+  local repo="$1"
+  echo "\${repo%%/*}"
+}
+get_scoped_skill_name() {
+  local skill_name="$1"
+  local repo="$2"
+  local org project_name
+  org=$(extract_org_from_repo "$repo")
+  project_name="\${repo##*/}"
+  echo "\${skill_name}@\${org}_\${project_name}"
+}
+get_scoped_skill_name "${skillName}" "${repo}"
+`;
+      const result = await $`bash -c ${script}`.quiet();
+      return result.text().trim();
+    }
+
+    test("handles skill name with numbers", async () => {
+      const result = await testScopedName("skill123", "org/project");
+      expect(result).toBe("skill123@org_project");
+    });
+
+    test("handles skill name starting with number", async () => {
+      const result = await testScopedName("123skill", "org/project");
+      expect(result).toBe("123skill@org_project");
+    });
+
+    test("handles skill name with consecutive hyphens", async () => {
+      const result = await testScopedName("my--skill", "org/project");
+      expect(result).toBe("my--skill@org_project");
+    });
+
+    test("handles single character skill name", async () => {
+      const result = await testScopedName("a", "org/project");
+      expect(result).toBe("a@org_project");
+    });
+
+    test("handles single character org and project", async () => {
+      const result = await testScopedName("skill", "a/b");
+      expect(result).toBe("skill@a_b");
+    });
+
+    test("handles repo with version numbers", async () => {
+      const result = await testScopedName("skill", "org/project-v2");
+      expect(result).toBe("skill@org_project-v2");
+    });
+  });
+
+  describe("is_scoped_skill pattern matching", () => {
+    async function isScopedSkill(skillName: string): Promise<boolean> {
+      const script = `
+is_scoped_skill() {
+  local skill_name="$1"
+  [[ "$skill_name" =~ ^[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+_[a-zA-Z0-9._-]+$ ]]
+}
+is_scoped_skill "${skillName}"
+`;
+      try {
+        await $`bash -c ${script}`.quiet();
+        return true;
+      } catch {
+        return false;
       }
     }
 
-    // Run the removal logic (extracted from install.sh)
-    const script = `
-shopt -s nullglob
+    test("rejects empty org component", async () => {
+      expect(await isScopedSkill("skill@_project")).toBe(false);
+    });
 
-remove_matching_files() {
-  local pattern="$1"
-  local dir="$2"
-  for cmd_file in "$dir"/$pattern; do
-    [ -f "$cmd_file" ] || continue
-    rm -f "$cmd_file"
-  done
+    test("rejects empty project component", async () => {
+      expect(await isScopedSkill("skill@org_")).toBe(false);
+    });
+
+    test("rejects multiple @ symbols", async () => {
+      // Strict pattern requires skill name to be alphanumeric only (no @)
+      expect(await isScopedSkill("skill@org@another_project")).toBe(false);
+    });
+
+    test("rejects spaces in skill name", async () => {
+      // Strict pattern only allows alphanumeric, dots, hyphens, underscores
+      expect(await isScopedSkill("my skill@org_project")).toBe(false);
+    });
+
+    test("accepts skill with numbers in all parts", async () => {
+      expect(await isScopedSkill("skill123@org456_project789")).toBe(true);
+    });
+
+    test("accepts very long valid scoped name", async () => {
+      const longName = "a".repeat(50) + "@" + "b".repeat(50) + "_" + "c".repeat(50);
+      expect(await isScopedSkill(longName)).toBe(true);
+    });
+  });
+
+  describe("skill installation with special folder structures", () => {
+    async function testSkillInstallation(
+      sourceSkills: string[],
+      repo: string
+    ): Promise<string[]> {
+      const { mkdir, rm, readdir, writeFile } = await import("fs/promises");
+
+      const sourceDir = join(tmpDir, "source-skills");
+      const destDir = join(tmpDir, "dest-skills");
+      await mkdir(sourceDir, { recursive: true });
+      await mkdir(destDir, { recursive: true });
+
+      // Create source skill folders with content
+      for (const skill of sourceSkills) {
+        const skillDir = join(sourceDir, skill);
+        await mkdir(skillDir, { recursive: true });
+        // Add a file inside to simulate real skill content
+        await writeFile(join(skillDir, "index.md"), `# ${skill}\n`);
+      }
+
+      const script = `
+is_scoped_skill() {
+  local skill_name="$1"
+  [[ "$skill_name" =~ ^[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+_[a-zA-Z0-9._-]+$ ]]
 }
 
-commands_dir="${commandsDir}"
-scope="${scopeToRemove}"
-agent="${agent}"
+extract_org_from_repo() {
+  local repo="$1"
+  echo "\${repo%%/*}"
+}
 
-case "$agent" in
-  gemini)
-    remove_matching_files "\${scope}:*.toml" "$commands_dir"
-    ;;
-  claude|opencode)
-    if [ -d "$commands_dir/$scope" ]; then
-      rm -rf "$commands_dir/$scope"
-    fi
-    ;;
-  cursor|factory|amp|windsurf)
-    remove_matching_files "\${scope}--*.md" "$commands_dir"
-    ;;
-esac
+get_scoped_skill_name() {
+  local skill_name="$1"
+  local repo="$2"
+  local org project_name
+  org=$(extract_org_from_repo "$repo")
+  project_name="\${repo##*/}"
+  echo "\${skill_name}@\${org}_\${project_name}"
+}
+
+source_skills="${sourceDir}"
+skills_dir="${destDir}"
+repo="${repo}"
+
+for skill_folder in "$source_skills"/*; do
+  [ -d "$skill_folder" ] || continue
+  skill_name=$(basename "$skill_folder")
+  if is_scoped_skill "$skill_name"; then
+    cp -r "$skill_folder" "$skills_dir/"
+  else
+    scoped_name=$(get_scoped_skill_name "$skill_name" "$repo")
+    cp -r "$skill_folder" "$skills_dir/$scoped_name"
+  fi
+done
 `;
 
-    await $`bash -c ${script}`.quiet();
+      await $`bash -c ${script}`.quiet();
 
-    // Get remaining files (recursively for folder-based)
-    const remaining: string[] = [];
-    const entries = await readdir(commandsDir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (entry.isDirectory()) {
-        const subEntries = await readdir(join(commandsDir, entry.name));
-        for (const sub of subEntries) {
-          remaining.push(`${entry.name}/${sub}`);
-        }
-      } else {
-        remaining.push(entry.name);
+      const installed = await readdir(destDir);
+      await rm(tmpDir, { recursive: true, force: true });
+
+      return installed.sort();
+    }
+
+    test("preserves nested content in skill folders", async () => {
+      const { mkdir, rm, readdir, readFile, writeFile } = await import("fs/promises");
+
+      const sourceDir = join(tmpDir, "source-nested");
+      const destDir = join(tmpDir, "dest-nested");
+      await mkdir(sourceDir, { recursive: true });
+      await mkdir(destDir, { recursive: true });
+
+      // Create skill with nested structure
+      const skillDir = join(sourceDir, "complex-skill");
+      await mkdir(join(skillDir, "subdir"), { recursive: true });
+      await writeFile(join(skillDir, "index.md"), "# Main");
+      await writeFile(join(skillDir, "subdir", "nested.md"), "# Nested");
+
+      const script = `
+is_scoped_skill() {
+  [[ "$1" =~ ^.+@[a-zA-Z0-9._-]+_[a-zA-Z0-9._-]+$ ]]
+}
+extract_org_from_repo() { echo "\${1%%/*}"; }
+get_scoped_skill_name() {
+  local org; org=$(extract_org_from_repo "$2")
+  echo "\${1}@\${org}_\${2##*/}"
+}
+
+for skill_folder in "${sourceDir}"/*; do
+  [ -d "$skill_folder" ] || continue
+  skill_name=$(basename "$skill_folder")
+  scoped_name=$(get_scoped_skill_name "$skill_name" "org/project")
+  cp -r "$skill_folder" "${destDir}/$scoped_name"
+done
+`;
+
+      await $`bash -c ${script}`.quiet();
+
+      const installed = await readdir(destDir);
+      expect(installed).toEqual(["complex-skill@org_project"]);
+
+      // Verify nested content was preserved
+      const nestedContent = await readFile(
+        join(destDir, "complex-skill@org_project", "subdir", "nested.md"),
+        "utf-8"
+      );
+      expect(nestedContent).toBe("# Nested");
+
+      await rm(tmpDir, { recursive: true, force: true });
+    });
+
+    test("handles large number of skills", async () => {
+      const skills = Array.from({ length: 50 }, (_, i) => `skill-${i}`);
+      const installed = await testSkillInstallation(skills, "org/project");
+
+      expect(installed.length).toBe(50);
+      expect(installed[0]).toBe("skill-0@org_project");
+      expect(installed[49]).toBe("skill-9@org_project"); // sorted alphabetically
+    });
+
+    test("handles skill with only files (no subdirectories)", async () => {
+      const installed = await testSkillInstallation(["simple-skill"], "org/project");
+      expect(installed).toEqual(["simple-skill@org_project"]);
+    });
+  });
+
+  describe("agent detection edge cases", () => {
+    test("detect_agent returns empty for clean directory", async () => {
+      const { mkdir, rm } = await import("fs/promises");
+      const testDir = join(tmpDir, "clean-dir");
+      await mkdir(testDir, { recursive: true });
+
+      const script = `
+cd "${testDir}"
+detect_agent() {
+  local agents=".gemini:gemini .github:copilot .cursor:cursor .opencode:opencode .amp:amp .goose:goose .factory:factory .codex:codex .windsurf:windsurf .claude:claude"
+  for entry in $agents; do
+    local dir="\${entry%%:*}"
+    local agent="\${entry#*:}"
+    if [ -d "$dir" ]; then
+      echo "$agent"
+      return 0
+    fi
+  done
+  echo ""
+}
+detect_agent
+`;
+      const result = await $`bash -c ${script}`.quiet();
+      expect(result.text().trim()).toBe("");
+
+      await rm(tmpDir, { recursive: true, force: true });
+    });
+
+    test("detect_agent prioritizes first match", async () => {
+      const { mkdir, rm } = await import("fs/promises");
+      const testDir = join(tmpDir, "multi-agent-dir");
+      await mkdir(join(testDir, ".gemini"), { recursive: true });
+      await mkdir(join(testDir, ".cursor"), { recursive: true });
+
+      const script = `
+cd "${testDir}"
+detect_agent() {
+  local agents=".gemini:gemini .github:copilot .cursor:cursor .opencode:opencode .amp:amp .goose:goose .factory:factory .codex:codex .windsurf:windsurf .claude:claude"
+  for entry in $agents; do
+    local dir="\${entry%%:*}"
+    local agent="\${entry#*:}"
+    if [ -d "$dir" ]; then
+      echo "$agent"
+      return 0
+    fi
+  done
+  echo ""
+}
+detect_agent
+`;
+      const result = await $`bash -c ${script}`.quiet();
+      expect(result.text().trim()).toBe("gemini");
+
+      await rm(tmpDir, { recursive: true, force: true });
+    });
+  });
+
+  describe("get_skill_scope_prefix validation", () => {
+    async function getSkillScopePrefix(repo: string): Promise<{ output: string; exitCode: number }> {
+      const script = `
+print_error() { echo "ERROR: $1" >&2; }
+
+validate_scope_component() {
+  local component="$1"
+  if [ -z "$component" ] || [[ "$component" =~ \\.\\. ]] || [[ "$component" =~ ^/ ]]; then
+    return 1
+  fi
+  return 0
+}
+
+extract_org_from_repo() {
+  local repo="$1"
+  local org="\${repo%%/*}"
+  if ! validate_scope_component "$org"; then
+    echo ""
+    return 1
+  fi
+  echo "$org"
+}
+
+get_skill_scope_prefix() {
+  local repo="$1"
+  local org project_name
+  org=$(extract_org_from_repo "$repo")
+  project_name="\${repo##*/}"
+  if ! validate_scope_component "$org" || ! validate_scope_component "$project_name"; then
+    echo ""
+    return 1
+  fi
+  echo "\${org}_\${project_name}"
+}
+
+get_skill_scope_prefix "${repo}"
+`;
+      try {
+        const result = await $`bash -c ${script}`.quiet();
+        return { output: result.text().trim(), exitCode: 0 };
+      } catch (error: unknown) {
+        const err = error as { stdout?: { toString(): string }; exitCode?: number };
+        return {
+          output: err.stdout?.toString().trim() ?? "",
+          exitCode: err.exitCode ?? 1,
+        };
       }
     }
-    await rm(tmpDir, { recursive: true, force: true });
 
-    return remaining.sort();
+    test("generates valid scope for normal repo", async () => {
+      const result = await getSkillScopePrefix("org/project");
+      expect(result.exitCode).toBe(0);
+      expect(result.output).toBe("org_project");
+    });
+
+    test("rejects repo with path traversal in org", async () => {
+      const result = await getSkillScopePrefix("../etc/passwd");
+      expect(result.output).toBe("");
+    });
+
+    test("rejects repo with absolute path", async () => {
+      const result = await getSkillScopePrefix("/absolute/path");
+      expect(result.output).toBe("");
+    });
+
+    test("handles repo with dots (not traversal)", async () => {
+      const result = await getSkillScopePrefix("org.name/project.name");
+      expect(result.exitCode).toBe(0);
+      expect(result.output).toBe("org.name_project.name");
+    });
+  });
+});
+
+describe("install.sh - JSON parsing (jq/awk)", () => {
+  // Test that JSON parsing works correctly regardless of jq availability
+  describe("get_project_names", () => {
+    test("returns project names using jq when available", async () => {
+      const script = `
+PROJECTS_JSON="${PROJECTS_JSON}"
+has_jq() { command -v jq >/dev/null 2>&1; }
+get_project_names() {
+  if has_jq; then
+    jq -r '.projects[].name' "$PROJECTS_JSON"
+  else
+    awk '
+      /"projects"[[:space:]]*:/ { in_projects=1 }
+      in_projects && /"name"[[:space:]]*:/ {
+        gsub(/.*"name"[[:space:]]*:[[:space:]]*"/, "")
+        gsub(/".*/, "")
+        print
+      }
+    ' "$PROJECTS_JSON"
+  fi
+}
+get_project_names
+`;
+      const result = await $`bash -c ${script}`.quiet();
+      const names = result.text().trim().split("\n").filter(Boolean);
+
+      // Should return at least one project name
+      expect(names.length).toBeGreaterThan(0);
+
+      // Verify against JSON content
+      const content = await readFile(PROJECTS_JSON, "utf-8");
+      const projects = JSON.parse(content);
+      const expectedNames = projects.projects.map((p: { name: string }) => p.name);
+      expect(names.sort()).toEqual(expectedNames.sort());
+    });
+
+    test("awk fallback produces same results as jq", async () => {
+      // Force awk fallback by overriding has_jq
+      const awkScript = `
+PROJECTS_JSON="${PROJECTS_JSON}"
+awk '
+  /"projects"[[:space:]]*:/ { in_projects=1 }
+  in_projects && /"name"[[:space:]]*:/ {
+    gsub(/.*"name"[[:space:]]*:[[:space:]]*"/, "")
+    gsub(/".*/, "")
+    print
   }
+' "$PROJECTS_JSON"
+`;
+      const awkResult = await $`bash -c ${awkScript}`.quiet();
+      const awkNames = awkResult.text().trim().split("\n").filter(Boolean);
 
-  test("removes gemini commands matching scope pattern", async () => {
-    const existing = [
-      "plaited_development-skills:commit.toml",
-      "plaited_development-skills:review.toml",
-      "plaited_acp-harness:test.toml"
-    ];
+      // Compare with JSON content
+      const content = await readFile(PROJECTS_JSON, "utf-8");
+      const projects = JSON.parse(content);
+      const expectedNames = projects.projects.map((p: { name: string }) => p.name);
 
-    const remaining = await testScopedCommandRemoval(
-      existing,
-      "plaited_development-skills",
-      "gemini"
-    );
-
-    expect(remaining).toEqual([
-      "plaited_acp-harness:test.toml"
-    ]);
+      expect(awkNames.sort()).toEqual(expectedNames.sort());
+    });
   });
 
-  test("removes claude folder-based commands", async () => {
-    const existing = [
-      "plaited_development-skills/commit.md",
-      "plaited_development-skills/review.md",
-      "plaited_acp-harness/test.md"
-    ];
+  describe("get_project_repo", () => {
+    test("returns correct repo for each project", async () => {
+      const content = await readFile(PROJECTS_JSON, "utf-8");
+      const projects = JSON.parse(content);
 
-    const remaining = await testScopedCommandRemoval(
-      existing,
-      "plaited_development-skills",
-      "claude"
-    );
+      for (const project of projects.projects) {
+        const script = `
+PROJECTS_JSON="${PROJECTS_JSON}"
+has_jq() { command -v jq >/dev/null 2>&1; }
+get_project_repo() {
+  local project_name="$1"
+  if has_jq; then
+    jq -r --arg name "$project_name" '.projects[] | select(.name == $name) | .repo' "$PROJECTS_JSON"
+  else
+    awk -v name="$project_name" '
+      /"name"[[:space:]]*:[[:space:]]*"'"$project_name"'"/ { found=1 }
+      found && /"repo"[[:space:]]*:/ {
+        gsub(/.*"repo"[[:space:]]*:[[:space:]]*"/, "")
+        gsub(/".*/, "")
+        print
+        exit
+      }
+    ' "$PROJECTS_JSON"
+  fi
+}
+get_project_repo "${project.name}"
+`;
+        const result = await $`bash -c ${script}`.quiet();
+        expect(result.text().trim()).toBe(project.repo);
+      }
+    });
 
-    expect(remaining).toEqual([
-      "plaited_acp-harness/test.md"
-    ]);
+    test("awk fallback returns correct repo for each project", async () => {
+      const content = await readFile(PROJECTS_JSON, "utf-8");
+      const projects = JSON.parse(content);
+
+      for (const project of projects.projects) {
+        const awkScript = `
+PROJECTS_JSON="${PROJECTS_JSON}"
+project_name="${project.name}"
+awk -v name="$project_name" '
+  /"name"[[:space:]]*:[[:space:]]*"'"$project_name"'"/ { found=1 }
+  found && /"repo"[[:space:]]*:/ {
+    gsub(/.*"repo"[[:space:]]*:[[:space:]]*"/, "")
+    gsub(/".*/, "")
+    print
+    exit
+  }
+' "$PROJECTS_JSON"
+`;
+        const result = await $`bash -c ${awkScript}`.quiet();
+        expect(result.text().trim()).toBe(project.repo);
+      }
+    });
+
+    test("returns empty for non-existent project", async () => {
+      const script = `
+PROJECTS_JSON="${PROJECTS_JSON}"
+has_jq() { command -v jq >/dev/null 2>&1; }
+get_project_repo() {
+  local project_name="$1"
+  if has_jq; then
+    jq -r --arg name "$project_name" '.projects[] | select(.name == $name) | .repo' "$PROJECTS_JSON"
+  else
+    awk -v name="$project_name" '
+      /"name"[[:space:]]*:[[:space:]]*"'"$project_name"'"/ { found=1 }
+      found && /"repo"[[:space:]]*:/ {
+        gsub(/.*"repo"[[:space:]]*:[[:space:]]*"/, "")
+        gsub(/".*/, "")
+        print
+        exit
+      }
+    ' "$PROJECTS_JSON"
+  fi
+}
+get_project_repo "non-existent-project-xyz"
+`;
+      const result = await $`bash -c ${script}`.quiet();
+      expect(result.text().trim()).toBe("");
+    });
   });
 
-  test("removes cursor prefix-based commands", async () => {
-    const existing = [
-      "plaited_development-skills--commit.md",
-      "plaited_development-skills--review.md",
-      "plaited_acp-harness--test.md"
-    ];
+  describe("has_jq detection", () => {
+    test("correctly detects jq availability", async () => {
+      const script = `
+has_jq() { command -v jq >/dev/null 2>&1; }
+if has_jq; then echo "jq-available"; else echo "jq-not-available"; fi
+`;
+      const result = await $`bash -c ${script}`.quiet();
+      const output = result.text().trim();
 
-    const remaining = await testScopedCommandRemoval(
-      existing,
-      "plaited_development-skills",
-      "cursor"
-    );
+      // Check if jq is actually available on this system
+      let jqAvailable = false;
+      try {
+        await $`which jq`.quiet();
+        jqAvailable = true;
+      } catch {
+        jqAvailable = false;
+      }
 
-    expect(remaining).toEqual([
-      "plaited_acp-harness--test.md"
-    ]);
+      if (jqAvailable) {
+        expect(output).toBe("jq-available");
+      } else {
+        expect(output).toBe("jq-not-available");
+      }
+    });
   });
 });
