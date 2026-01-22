@@ -218,6 +218,41 @@ validate_scope_component() {
   return 0
 }
 
+# Validate that a target path is safely within a parent directory
+# Prevents path traversal attacks before rm -rf operations
+validate_path_within_dir() {
+  local parent_dir="$1"
+  local target_path="$2"
+
+  # Resolve parent to absolute path
+  local resolved_parent
+  resolved_parent=$(cd "$parent_dir" 2>/dev/null && pwd -P)
+  [ -z "$resolved_parent" ] && return 1
+
+  # Get the basename (skill folder name) and check it's simple (no slashes or ..)
+  local basename
+  basename=$(basename "$target_path")
+  if [[ "$basename" =~ / ]] || [[ "$basename" =~ \.\. ]] || [ -z "$basename" ]; then
+    return 1
+  fi
+
+  # Target must be direct child of parent (parent_dir/basename)
+  local expected_target="$resolved_parent/$basename"
+  local actual_target
+  # Normalize the target path by removing any ../ sequences
+  actual_target=$(cd "$parent_dir" && cd "$(dirname "$target_path")" 2>/dev/null && pwd -P)/$(basename "$target_path")
+
+  # If we can't resolve, check simpler: target should equal parent/basename
+  if [ -z "$actual_target" ]; then
+    # Fallback: just verify target_path equals skills_dir/basename
+    [ "$target_path" = "$resolved_parent/$basename" ]
+    return $?
+  fi
+
+  # Check resolved paths match
+  [ "$actual_target" = "$expected_target" ]
+}
+
 # Extract org from repo path (e.g., "plaited" from "plaited/development-skills")
 extract_org_from_repo() {
   local repo="$1"
@@ -465,33 +500,54 @@ install_project() {
         target_path="$skills_dir/$scoped_name"
       fi
 
+      # Security: validate target path stays within skills_dir before any rm operations
+      if ! validate_path_within_dir "$skills_dir" "$target_path"; then
+        print_error "  Skipped: $skill_name (invalid target path)"
+        continue
+      fi
+
       # Check if replacing existing skill
       local replacing=false
       if [ -d "$target_path" ]; then
         replacing=true
       fi
 
-      # Atomic replace-on-install: copy to temp, remove old, move new
-      local temp_target="${target_path}.tmp.$$"
+      # Atomic replace-on-install strategy:
+      # 1. Copy new content to temp directory (preserves old if copy fails)
+      # 2. Remove old directory (temp exists if this fails, user can retry)
+      # 3. Move temp to final location (atomic on same filesystem)
+      #
+      # Error recovery: On any failure, we clean up temp and skip this skill.
+      # The worst case is partial state where old was removed but move failed,
+      # leaving no skill installed - user can re-run to retry.
+
+      # Use mktemp for unique temp name (more robust than PID-based naming)
+      local temp_dir temp_target
+      temp_dir=$(mktemp -d "${skills_dir}/.install-tmp.XXXXXX")
+      temp_target="$temp_dir/$(basename "$target_path")"
+
       if ! cp -r "$skill_folder" "$temp_target"; then
         print_error "  Failed to copy: $skill_name"
-        rm -rf "$temp_target" 2>/dev/null
+        rm -rf "$temp_dir" 2>/dev/null
         continue
       fi
 
       if [ "$replacing" = true ]; then
         if ! rm -rf "$target_path"; then
           print_error "  Failed to remove existing: $skill_name"
-          rm -rf "$temp_target"
+          rm -rf "$temp_dir" 2>/dev/null
           continue
         fi
       fi
 
       if ! mv "$temp_target" "$target_path"; then
         print_error "  Failed to install: $skill_name"
-        rm -rf "$temp_target" 2>/dev/null
+        rm -rf "$temp_dir" 2>/dev/null
         continue
       fi
+
+      # Clean up temp directory (now empty after successful mv)
+      rm -rf "$temp_dir" 2>/dev/null
 
       # Report what was done
       local display_name

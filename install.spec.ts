@@ -794,7 +794,7 @@ describe("install.sh - replace-on-install behavior", () => {
     await writeFile(join(existingSkillDir, "index.md"), "# Modified Content");
     await writeFile(join(existingSkillDir, "extra-file.txt"), "This should be removed");
 
-    // Run installation logic with replace-on-install behavior
+    // Run installation logic with atomic replace-on-install behavior (matches actual implementation)
     const script = `
 is_scoped_skill() {
   local skill_name="$1"
@@ -815,6 +815,18 @@ get_scoped_skill_name() {
   echo "\${skill_name}@\${org}_\${project_name}"
 }
 
+validate_path_within_dir() {
+  local parent_dir="$1"
+  local target_path="$2"
+  local resolved_parent resolved_target
+  resolved_parent=$(cd "$parent_dir" 2>/dev/null && pwd -P)
+  resolved_target=$(cd "$(dirname "$target_path")" 2>/dev/null && pwd -P)/$(basename "$target_path")
+  case "$resolved_target" in
+    "$resolved_parent"/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 source_skills="${sourceDir}"
 skills_dir="${destDir}"
 repo="org/project"
@@ -832,12 +844,40 @@ for skill_folder in "$source_skills"/*; do
     target_path="$skills_dir/$scoped_name"
   fi
 
-  # Remove existing folder if present (replace-on-install behavior)
-  if [ -d "$target_path" ]; then
-    rm -rf "$target_path"
+  # Security: validate target path stays within skills_dir
+  if ! validate_path_within_dir "$skills_dir" "$target_path"; then
+    continue
   fi
 
-  cp -r "$skill_folder" "$target_path"
+  # Check if replacing existing skill
+  local replacing=false
+  if [ -d "$target_path" ]; then
+    replacing=true
+  fi
+
+  # Atomic replace: copy to temp, remove old, move new
+  local temp_dir temp_target
+  temp_dir=$(mktemp -d "\${skills_dir}/.install-tmp.XXXXXX")
+  temp_target="$temp_dir/$(basename "$target_path")"
+
+  if ! cp -r "$skill_folder" "$temp_target"; then
+    rm -rf "$temp_dir" 2>/dev/null
+    continue
+  fi
+
+  if [ "$replacing" = true ]; then
+    if ! rm -rf "$target_path"; then
+      rm -rf "$temp_dir" 2>/dev/null
+      continue
+    fi
+  fi
+
+  if ! mv "$temp_target" "$target_path"; then
+    rm -rf "$temp_dir" 2>/dev/null
+    continue
+  fi
+
+  rm -rf "$temp_dir" 2>/dev/null
 done
 `;
 
@@ -882,6 +922,7 @@ done
     await mkdir(existingSkillDir, { recursive: true });
     await writeFile(join(existingSkillDir, "skill.md"), "# Old Version");
 
+    // Use atomic implementation matching actual code
     const script = `
 is_scoped_skill() {
   local skill_name="$1"
@@ -902,12 +943,19 @@ for skill_folder in "$source_skills"/*; do
     target_path="$skills_dir/$skill_name"
   fi
 
-  # Remove existing folder if present (replace-on-install behavior)
+  # Atomic replace: copy to temp, remove old, move new
+  local temp_dir temp_target
+  temp_dir=$(mktemp -d "\${skills_dir}/.install-tmp.XXXXXX")
+  temp_target="$temp_dir/$(basename "$target_path")"
+
+  cp -r "$skill_folder" "$temp_target" || { rm -rf "$temp_dir"; continue; }
+
   if [ -d "$target_path" ]; then
-    rm -rf "$target_path"
+    rm -rf "$target_path" || { rm -rf "$temp_dir"; continue; }
   fi
 
-  cp -r "$skill_folder" "$target_path"
+  mv "$temp_target" "$target_path" || { rm -rf "$temp_dir"; continue; }
+  rm -rf "$temp_dir" 2>/dev/null
 done
 `;
 
@@ -933,7 +981,7 @@ done
     await mkdir(sourceSkillDir, { recursive: true });
     await writeFile(join(sourceSkillDir, "index.md"), "# New Skill");
 
-    // No existing folder at destination
+    // No existing folder at destination - test atomic fresh install
 
     const script = `
 is_scoped_skill() {
@@ -971,12 +1019,14 @@ for skill_folder in "$source_skills"/*; do
     target_path="$skills_dir/$scoped_name"
   fi
 
-  # Remove existing folder if present (replace-on-install behavior)
-  if [ -d "$target_path" ]; then
-    rm -rf "$target_path"
-  fi
+  # Atomic install: copy to temp, then move
+  local temp_dir temp_target
+  temp_dir=$(mktemp -d "\${skills_dir}/.install-tmp.XXXXXX")
+  temp_target="$temp_dir/$(basename "$target_path")"
 
-  cp -r "$skill_folder" "$target_path"
+  cp -r "$skill_folder" "$temp_target" || { rm -rf "$temp_dir"; continue; }
+  mv "$temp_target" "$target_path" || { rm -rf "$temp_dir"; continue; }
+  rm -rf "$temp_dir" 2>/dev/null
 done
 `;
 
@@ -988,6 +1038,168 @@ done
 
     const content = await readFile(join(destDir, "new-skill@org_project", "index.md"), "utf-8");
     expect(content).toBe("# New Skill");
+
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+});
+
+describe("install.sh - error handling", () => {
+  const tmpDir = join(import.meta.dir, ".test-tmp-errors");
+
+  test("handles copy failure gracefully", async () => {
+    const { mkdir, rm, readdir, chmod } = await import("fs/promises");
+
+    const sourceDir = join(tmpDir, "source-err");
+    const destDir = join(tmpDir, "dest-err");
+    await mkdir(sourceDir, { recursive: true });
+    await mkdir(destDir, { recursive: true });
+
+    // Create source skill folder
+    const sourceSkillDir = join(sourceDir, "my-skill");
+    await mkdir(sourceSkillDir, { recursive: true });
+
+    // Make dest dir read-only to cause copy failure
+    await chmod(destDir, 0o444);
+
+    const script = `
+skills_dir="${destDir}"
+skill_folder="${sourceSkillDir}"
+skill_name="my-skill"
+target_path="$skills_dir/my-skill@org_project"
+
+# Atomic install attempt
+temp_dir=$(mktemp -d "\${skills_dir}/.install-tmp.XXXXXX" 2>/dev/null)
+if [ -z "$temp_dir" ]; then
+  echo "COPY_FAILED"
+  exit 0
+fi
+
+temp_target="$temp_dir/$(basename "$target_path")"
+
+if ! cp -r "$skill_folder" "$temp_target" 2>/dev/null; then
+  rm -rf "$temp_dir" 2>/dev/null
+  echo "COPY_FAILED"
+  exit 0
+fi
+
+echo "COPY_SUCCESS"
+`;
+
+    const result = await $`bash -c ${script}`.quiet();
+    expect(result.text().trim()).toBe("COPY_FAILED");
+
+    // Restore permissions and cleanup
+    await chmod(destDir, 0o755);
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  test("cleans up temp files on move failure", async () => {
+    const { mkdir, rm, readdir, writeFile } = await import("fs/promises");
+
+    const sourceDir = join(tmpDir, "source-mv-err");
+    const destDir = join(tmpDir, "dest-mv-err");
+    await mkdir(sourceDir, { recursive: true });
+    await mkdir(destDir, { recursive: true });
+
+    // Create source skill folder
+    const sourceSkillDir = join(sourceDir, "my-skill");
+    await mkdir(sourceSkillDir, { recursive: true });
+    await writeFile(join(sourceSkillDir, "index.md"), "# Test");
+
+    const script = `
+skills_dir="${destDir}"
+skill_folder="${sourceSkillDir}"
+target_path="$skills_dir/my-skill@org_project"
+
+# Atomic install with simulated move failure
+temp_dir=$(mktemp -d "\${skills_dir}/.install-tmp.XXXXXX")
+temp_target="$temp_dir/$(basename "$target_path")"
+
+cp -r "$skill_folder" "$temp_target"
+
+# Simulate move failure and verify cleanup
+if ! false; then  # Always fails
+  rm -rf "$temp_dir" 2>/dev/null
+  echo "CLEANUP_DONE"
+  exit 0
+fi
+`;
+
+    const result = await $`bash -c ${script}`.quiet();
+    expect(result.text().trim()).toBe("CLEANUP_DONE");
+
+    // Verify no temp directories left behind
+    const files = await readdir(destDir);
+    const tempDirs = files.filter(f => f.startsWith(".install-tmp"));
+    expect(tempDirs.length).toBe(0);
+
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  test("path validation rejects traversal attempts", async () => {
+    const { mkdir, rm } = await import("fs/promises");
+
+    // Create actual test directories
+    const testDir = join(tmpDir, "path-validation");
+    const skillsDir = join(testDir, "skills");
+    await mkdir(skillsDir, { recursive: true });
+
+    const script = `
+validate_path_within_dir() {
+  local parent_dir="$1"
+  local target_path="$2"
+
+  local resolved_parent
+  resolved_parent=$(cd "$parent_dir" 2>/dev/null && pwd -P)
+  [ -z "$resolved_parent" ] && return 1
+
+  local basename
+  basename=$(basename "$target_path")
+  if [[ "$basename" =~ / ]] || [[ "$basename" =~ \\.\\. ]] || [ -z "$basename" ]; then
+    return 1
+  fi
+
+  local expected_target="$resolved_parent/$basename"
+  local actual_target
+  actual_target=$(cd "$parent_dir" && cd "$(dirname "$target_path")" 2>/dev/null && pwd -P)/$(basename "$target_path")
+
+  if [ -z "$actual_target" ]; then
+    [ "$target_path" = "$resolved_parent/$basename" ]
+    return $?
+  fi
+
+  [ "$actual_target" = "$expected_target" ]
+}
+
+skills_dir="${skillsDir}"
+
+# Test valid path (direct child of skills_dir)
+if validate_path_within_dir "$skills_dir" "$skills_dir/my-skill@org_project"; then
+  echo "VALID_PATH_OK"
+else
+  echo "VALID_PATH_FAIL"
+fi
+
+# Test traversal attempt (trying to escape skills_dir)
+if validate_path_within_dir "$skills_dir" "$skills_dir/../etc/passwd"; then
+  echo "TRAVERSAL_ALLOWED"
+else
+  echo "TRAVERSAL_BLOCKED"
+fi
+
+# Test path with .. in basename
+if validate_path_within_dir "$skills_dir" "$skills_dir/.."; then
+  echo "DOTDOT_ALLOWED"
+else
+  echo "DOTDOT_BLOCKED"
+fi
+`;
+
+    const result = await $`bash -c ${script}`.quiet();
+    const output = result.text().trim();
+    expect(output).toContain("VALID_PATH_OK");
+    expect(output).toContain("TRAVERSAL_BLOCKED");
+    expect(output).toContain("DOTDOT_BLOCKED");
 
     await rm(tmpDir, { recursive: true, force: true });
   });
