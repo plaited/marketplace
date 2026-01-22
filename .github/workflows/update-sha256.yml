@@ -1,3 +1,5 @@
+# Automatically regenerates projects.json.sha256 when projects.json changes.
+# This ensures the install script's checksum validation always passes.
 name: Update SHA256
 
 on:
@@ -6,6 +8,10 @@ on:
       - main
     paths:
       - projects.json
+
+concurrency:
+  group: update-sha256
+  cancel-in-progress: false
 
 jobs:
   update-checksum:
@@ -17,7 +23,7 @@ jobs:
           token: ${{ secrets.GH_PAT }}
 
       - name: Generate SHA256 checksum
-        run: shasum -a 256 projects.json > projects.json.sha256
+        run: shasum -a 256 projects.json > projects.json.sha256 || exit 1
 
       - name: Check for changes
         id: check
