@@ -89,11 +89,12 @@ Development tools including:
 
 ### agent-eval-harness
 
-Unified toolkit for ACP client usage and agent evaluation:
+CLI tool for evaluating AI agents by capturing execution trajectories:
 
-- Connect to ACP-compatible agents programmatically
-- Capture full trajectories (tools, thoughts, plans)
-- Run evaluations and generate training data
+- Capture full execution traces (thoughts, messages, tool calls, plans)
+- Run pass@k evaluations with customizable grading functions
+- Schema-driven adapters for any CLI agent producing JSON output
+- Unix-style composable pipelines (run → extract → grade → format)
 
 **Source:** [plaited/agent-eval-harness](https://github.com/plaited/agent-eval-harness)
 
