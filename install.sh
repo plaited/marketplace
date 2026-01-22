@@ -139,22 +139,36 @@ warn_jq_fallback() {
   fi
 }
 
-# Get all project names from projects.json
+# Cache for project names (avoids re-parsing projects.json on every call)
+CACHED_PROJECT_NAMES=""
+
+# Get all project names from projects.json (cached for performance)
 get_project_names() {
+  # Return cached result if available
+  if [ -n "$CACHED_PROJECT_NAMES" ]; then
+    echo "$CACHED_PROJECT_NAMES"
+    return 0
+  fi
+
+  local names
   if has_jq; then
-    jq -r '.projects[].name' "$PROJECTS_JSON"
+    names=$(jq -r '.projects[].name' "$PROJECTS_JSON")
   else
     warn_jq_fallback
     # Fallback: parse with awk
-    awk '
+    names=$(awk '
       /"projects"[[:space:]]*:/ { in_projects=1 }
       in_projects && /"name"[[:space:]]*:/ {
         gsub(/.*"name"[[:space:]]*:[[:space:]]*"/, "")
         gsub(/".*/, "")
         print
       }
-    ' "$PROJECTS_JSON"
+    ' "$PROJECTS_JSON")
   fi
+
+  # Cache the result
+  CACHED_PROJECT_NAMES="$names"
+  echo "$names"
 }
 
 # Get repository path for a project
@@ -215,6 +229,40 @@ validate_scope_component() {
   if [ -z "$component" ] || [[ "$component" =~ \.\. ]] || [[ "$component" =~ ^/ ]]; then
     return 1
   fi
+  return 0
+}
+
+# Validate sparse_path content for security
+# Prevents command injection and path traversal attacks
+validate_sparse_path() {
+  local sparse_path="$1"
+
+  # Reject empty
+  if [ -z "$sparse_path" ]; then
+    return 1
+  fi
+
+  # Reject path traversal sequences
+  if [[ "$sparse_path" =~ \.\. ]]; then
+    return 1
+  fi
+
+  # Reject absolute paths
+  if [[ "$sparse_path" =~ ^/ ]]; then
+    return 1
+  fi
+
+  # Reject shell special characters that could enable command injection
+  # This includes: $, `, (, ), |, &, ;, <, >, ', ", \, !, space, tab, newline
+  if [[ "$sparse_path" =~ [\$\`\(\)\|\&\;\<\>\'\"\\\!\[:space:]] ]]; then
+    return 1
+  fi
+
+  # Only allow safe characters: alphanumeric, dots, hyphens, underscores, forward slashes
+  if [[ "$sparse_path" =~ [^a-zA-Z0-9._/-] ]]; then
+    return 1
+  fi
+
   return 0
 }
 
@@ -379,6 +427,7 @@ get_project_dependencies() {
 
   # Check .sparse_path file exists
   if [ ! -f "$project_temp/.sparse_path" ]; then
+    print_info "No .sparse_path file found in $project_temp"
     echo ""
     return 0
   fi
@@ -386,16 +435,18 @@ get_project_dependencies() {
   local sparse_path
   sparse_path=$(cat "$project_temp/.sparse_path")
 
-  # Validate sparse_path is not empty
-  if [ -z "$sparse_path" ]; then
+  # Security: validate sparse_path content
+  if ! validate_sparse_path "$sparse_path"; then
+    print_error "Invalid .sparse_path content in $project_temp (security check failed)"
     echo ""
-    return 0
+    return 1
   fi
 
   local source_skills="$project_temp/$sparse_path/skills"
   local dependencies=""
 
   if [ ! -d "$source_skills" ]; then
+    print_info "No skills directory found at $source_skills"
     echo ""
     return 0
   fi
@@ -593,6 +644,12 @@ install_project() {
   local project_temp="$TEMP_DIR/$project_name"
   local sparse_path
   sparse_path=$(cat "$project_temp/.sparse_path")
+
+  # Security: validate sparse_path content
+  if ! validate_sparse_path "$sparse_path"; then
+    print_error "Invalid .sparse_path content for $project_name (security check failed)"
+    return 1
+  fi
 
   local source_skills="$project_temp/$sparse_path/skills"
 
@@ -821,9 +878,16 @@ do_install() {
       continue
     fi
 
-    if ! install_project_with_dependencies "$project_name" "$skills_dir"; then
+    # Install project with dependencies
+    # Return codes: 0=success, 1=failure, 2=partial (project ok, some deps failed)
+    install_project_with_dependencies "$project_name" "$skills_dir"
+    local install_result=$?
+
+    if [ "$install_result" -eq 1 ]; then
+      # Complete failure - skip this project
       continue
     fi
+    # Return 0 or 2 both mean the project was installed
     projects_installed=$((projects_installed + 1))
   done
 

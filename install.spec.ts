@@ -2737,3 +2737,80 @@ done
     await rm(tmpDir, { recursive: true, force: true });
   });
 });
+
+describe("install.sh - sparse_path security validation", () => {
+  async function validateSparsePath(sparsePath: string): Promise<boolean> {
+    // Escape the sparse path for safe bash inclusion
+    const escapedPath = sparsePath.replace(/'/g, "'\\''");
+    const script = `
+validate_sparse_path() {
+  local sparse_path="$1"
+
+  if [ -z "$sparse_path" ]; then
+    return 1
+  fi
+
+  if [[ "$sparse_path" =~ \\.\\. ]]; then
+    return 1
+  fi
+
+  if [[ "$sparse_path" =~ ^/ ]]; then
+    return 1
+  fi
+
+  if [[ "$sparse_path" =~ [^a-zA-Z0-9._/-] ]]; then
+    return 1
+  fi
+
+  return 0
+}
+
+validate_sparse_path '${escapedPath}'
+`;
+    try {
+      await $`bash -c ${script}`.quiet();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  test("accepts valid sparse path", async () => {
+    expect(await validateSparsePath(".claude")).toBe(true);
+    expect(await validateSparsePath(".github/skills")).toBe(true);
+    expect(await validateSparsePath("src/skills")).toBe(true);
+    expect(await validateSparsePath("my-project_v2.0")).toBe(true);
+  });
+
+  test("rejects empty sparse path", async () => {
+    expect(await validateSparsePath("")).toBe(false);
+  });
+
+  test("rejects path traversal attempts", async () => {
+    expect(await validateSparsePath("..")).toBe(false);
+    expect(await validateSparsePath("../etc")).toBe(false);
+    expect(await validateSparsePath(".claude/../..")).toBe(false);
+    expect(await validateSparsePath("foo/../../bar")).toBe(false);
+  });
+
+  test("rejects absolute paths", async () => {
+    expect(await validateSparsePath("/etc/passwd")).toBe(false);
+    expect(await validateSparsePath("/")).toBe(false);
+  });
+
+  test("rejects command injection attempts", async () => {
+    expect(await validateSparsePath("; rm -rf /")).toBe(false);
+    expect(await validateSparsePath("$(whoami)")).toBe(false);
+    expect(await validateSparsePath("`id`")).toBe(false);
+    expect(await validateSparsePath("foo|bar")).toBe(false);
+    expect(await validateSparsePath("foo&bar")).toBe(false);
+    expect(await validateSparsePath("foo;bar")).toBe(false);
+  });
+
+  test("rejects special characters", async () => {
+    expect(await validateSparsePath("foo bar")).toBe(false);
+    expect(await validateSparsePath("foo\tbar")).toBe(false);
+    expect(await validateSparsePath("foo'bar")).toBe(false);
+    expect(await validateSparsePath('foo"bar')).toBe(false);
+  });
+});
