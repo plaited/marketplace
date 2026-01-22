@@ -519,7 +519,8 @@ install_project() {
       #
       # Error recovery: On any failure, we clean up temp and skip this skill.
       # The worst case is partial state where old was removed but move failed,
-      # leaving no skill installed - user can re-run to retry.
+      # leaving no skill installed. Recovery: simply re-run the installer to
+      # complete the installation - it will install the missing skill fresh.
 
       # Use mktemp for unique temp name (more robust than PID-based naming)
       local temp_dir temp_target
