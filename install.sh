@@ -239,8 +239,10 @@ validate_path_within_dir() {
   # Target must be direct child of parent (parent_dir/basename)
   local expected_target="$resolved_parent/$basename"
   local actual_target
-  # Normalize the target path by removing any ../ sequences
-  actual_target=$(cd "$parent_dir" && cd "$(dirname "$target_path")" 2>/dev/null && pwd -P)/$(basename "$target_path")
+  # Resolve dirname of target_path from original working directory (where relative path makes sense)
+  local target_dirname
+  target_dirname=$(cd "$(dirname "$target_path")" 2>/dev/null && pwd -P)
+  actual_target="$target_dirname/$basename"
 
   # If we can't resolve, check simpler: target should equal parent/basename
   if [ -z "$actual_target" ]; then
@@ -294,6 +296,91 @@ get_skill_scope_prefix() {
   echo "${org}_${project_name}"
 }
 
+
+# ============================================================================
+# Dependency Detection and Tracking
+# ============================================================================
+
+# Track which projects have been installed to prevent infinite loops
+INSTALLED_PROJECTS=""
+
+# Check if a project has already been installed in this session
+is_project_installed() {
+  local project="$1"
+  [[ " $INSTALLED_PROJECTS " =~ " $project " ]]
+}
+
+# Mark a project as installed
+mark_project_installed() {
+  INSTALLED_PROJECTS="$INSTALLED_PROJECTS $1"
+}
+
+# Check if a scoped skill references a project in projects.json
+# Returns the project name if found, empty otherwise
+# Example: "typescript-lsp@plaited_development-skills" -> "development-skills"
+get_skill_source_project() {
+  local skill_name="$1"  # e.g., "typescript-lsp@plaited_development-skills"
+
+  # Only process scoped skills
+  if ! is_scoped_skill "$skill_name"; then
+    echo ""
+    return 1
+  fi
+
+  # Extract project name from scope (after @org_)
+  local scope_part="${skill_name##*@}"  # "plaited_development-skills"
+  local project_name="${scope_part#*_}" # "development-skills"
+
+  # Check if this project exists in projects.json
+  local known_projects
+  known_projects=$(get_project_names)
+  for known in $known_projects; do
+    if [ "$known" = "$project_name" ]; then
+      echo "$project_name"
+      return 0
+    fi
+  done
+
+  echo ""
+  return 1
+}
+
+# Scan a project's skills directory for dependencies (referenced projects)
+# Returns space-separated list of project names that should be installed first
+get_project_dependencies() {
+  local project_temp="$1"
+  local sparse_path
+  sparse_path=$(cat "$project_temp/.sparse_path")
+  local source_skills="$project_temp/$sparse_path/skills"
+  local dependencies=""
+
+  if [ ! -d "$source_skills" ]; then
+    echo ""
+    return 0
+  fi
+
+  for skill_folder in "$source_skills"/*; do
+    [ -d "$skill_folder" ] || continue
+    local skill_name
+    skill_name=$(basename "$skill_folder")
+
+    # Check if this scoped skill references a known project
+    local source_project
+    source_project=$(get_skill_source_project "$skill_name")
+    if [ -n "$source_project" ]; then
+      # Add to dependencies if not already there
+      if ! [[ " $dependencies " =~ " $source_project " ]]; then
+        dependencies="$dependencies $source_project"
+      fi
+    fi
+  done
+
+  echo "$dependencies"
+}
+
+# ============================================================================
+# Scoped Content Removal
+# ============================================================================
 
 # Remove all scoped skills for a project
 # Used by both update and uninstall operations
@@ -488,7 +575,15 @@ install_project() {
       # Determine target path
       local target_path
       if is_scoped_skill "$skill_name"; then
-        # Already scoped - copy as-is (inherited skill)
+        # Check if this inherited skill comes from a project we'll install separately
+        local source_project
+        source_project=$(get_skill_source_project "$skill_name")
+        if [ -n "$source_project" ]; then
+          # Skip - this skill will be (or was) installed from its source project
+          print_info "  Skipped: $skill_name (will install from $source_project)"
+          continue
+        fi
+        # Already scoped but from unknown source - copy as-is
         target_path="$skills_dir/$skill_name"
       else
         # Not scoped - rename with scope
@@ -579,6 +674,51 @@ install_project() {
 # Main Installation
 # ============================================================================
 
+# Install a project with its dependencies (recursive)
+# This function handles the recursive dependency resolution
+install_project_with_dependencies() {
+  local project_name="$1"
+  local skills_dir="$2"
+
+  # Skip if already installed in this session
+  if is_project_installed "$project_name"; then
+    return 0
+  fi
+
+  # Get repo and clone
+  local source
+  source=$(get_project_repo "$project_name")
+  if [ -z "$source" ]; then
+    print_error "Could not find source for $project_name"
+    return 1
+  fi
+
+  if ! clone_project "$project_name" "$source"; then
+    return 1
+  fi
+
+  # Detect dependencies from scoped skills in this project
+  local project_temp="$TEMP_DIR/$project_name"
+  local dependencies
+  dependencies=$(get_project_dependencies "$project_temp")
+
+  # Install dependencies first (recursively)
+  for dep in $dependencies; do
+    if ! is_project_installed "$dep"; then
+      print_info "Installing dependency: $dep (required by $project_name)"
+      if ! install_project_with_dependencies "$dep" "$skills_dir"; then
+        print_error "Failed to install dependency $dep for $project_name"
+        # Continue anyway - the inherited skills will be skipped
+      fi
+    fi
+  done
+
+  # Now install this project's skills
+  install_project "$project_name" "$skills_dir"
+  mark_project_installed "$project_name"
+  return 0
+}
+
 do_install() {
   local agent="$1"
   local specific_project="$2"
@@ -604,6 +744,9 @@ do_install() {
   TEMP_DIR=$(mktemp -d)
   mkdir -p "$skills_dir"
 
+  # Reset installed projects tracking for this session
+  INSTALLED_PROJECTS=""
+
   local projects_installed=0
 
   # Get all project names
@@ -616,18 +759,15 @@ do_install() {
       continue
     fi
 
-    local source
-    source=$(get_project_repo "$project_name")
-
-    if [ -z "$source" ]; then
-      print_error "Could not find source for $project_name"
+    # Skip if already installed as a dependency
+    if is_project_installed "$project_name"; then
+      projects_installed=$((projects_installed + 1))
       continue
     fi
 
-    if ! clone_project "$project_name" "$source"; then
+    if ! install_project_with_dependencies "$project_name" "$skills_dir"; then
       continue
     fi
-    install_project "$project_name" "$skills_dir"
     projects_installed=$((projects_installed + 1))
   done
 
