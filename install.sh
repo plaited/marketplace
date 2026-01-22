@@ -7,7 +7,6 @@
 #   ./install.sh --agent gemini               # Direct: install for Gemini CLI
 #   ./install.sh --project development-skills # Install specific project only
 #   ./install.sh --list                       # List available projects
-#   ./install.sh --update                     # Update existing installation
 #   ./install.sh --uninstall                  # Remove installation
 
 set -e
@@ -451,10 +450,11 @@ install_project() {
       local skill_name
       skill_name=$(basename "$skill_folder")
 
+      # Determine target path
+      local target_path
       if is_scoped_skill "$skill_name"; then
         # Already scoped - copy as-is (inherited skill)
-        cp -r "$skill_folder" "$skills_dir/"
-        print_info "  Preserved: $skill_name"
+        target_path="$skills_dir/$skill_name"
       else
         # Not scoped - rename with scope
         local scoped_name
@@ -462,7 +462,18 @@ install_project() {
           print_error "  Skipped: $skill_name (invalid scope components)"
           continue
         fi
-        cp -r "$skill_folder" "$skills_dir/$scoped_name"
+        target_path="$skills_dir/$scoped_name"
+      fi
+
+      # Remove existing folder if present (replace-on-install behavior)
+      if [ -d "$target_path" ]; then
+        rm -rf "$target_path"
+      fi
+
+      cp -r "$skill_folder" "$target_path"
+      if is_scoped_skill "$skill_name"; then
+        print_info "  Preserved: $skill_name"
+      else
         print_info "  Installed: $scoped_name"
       fi
     done
@@ -577,50 +588,6 @@ do_list() {
 }
 
 # ============================================================================
-# Update
-# ============================================================================
-
-do_update() {
-  local agent="$1"
-  local specific_project="$2"
-  local skills_dir_override="$3"
-
-  # Use provided agent or detect from existing installation
-  if [ -z "$agent" ]; then
-    agent=$(detect_agent)
-    if [ -z "$agent" ]; then
-      print_error "No existing installation detected"
-      print_info "Run without --update to install, or specify --agent"
-      exit 1
-    fi
-  fi
-
-  print_info "Updating installation for: $agent"
-
-  local skills_dir
-  # Use override if provided, otherwise get from agent
-  if [ -n "$skills_dir_override" ]; then
-    skills_dir="$skills_dir_override"
-  else
-    skills_dir=$(get_skills_dir "$agent")
-  fi
-
-  # Get all project names and remove their skill directories
-  local project_names
-  project_names=$(get_project_names)
-
-  for project_name in $project_names; do
-    if [ -n "$specific_project" ] && [ "$project_name" != "$specific_project" ]; then
-      continue
-    fi
-    remove_project_scoped_content "$agent" "$project_name" "$skills_dir"
-  done
-
-  # Reinstall
-  do_install "$agent" "$specific_project" "$skills_dir_override"
-}
-
-# ============================================================================
 # Uninstall
 # ============================================================================
 
@@ -684,7 +651,6 @@ show_help() {
   echo "  --project <name>     Install specific project only"
   echo "  --skills-dir <path>  Override skills directory"
   echo "  --list               List available projects"
-  echo "  --update             Update existing installation"
   echo "  --uninstall          Remove installation"
   echo "  --help               Show this help message"
   echo ""
@@ -710,7 +676,6 @@ show_help() {
   echo "  ./install.sh --agent gemini               # Install all for Gemini"
   echo "  ./install.sh --agent cursor --project development-skills"
   echo "  ./install.sh --list                       # List available projects"
-  echo "  ./install.sh --update                     # Update existing"
   echo "  ./install.sh --uninstall                  # Remove all"
 }
 
@@ -736,10 +701,6 @@ main() {
         ;;
       --list)
         action="list"
-        shift
-        ;;
-      --update)
-        action="update"
         shift
         ;;
       --uninstall)
@@ -827,9 +788,6 @@ main() {
       fi
 
       do_install "$agent" "$project" "$skills_dir_override"
-      ;;
-    update)
-      do_update "$agent" "$project" "$skills_dir_override"
       ;;
     uninstall)
       do_uninstall "$agent" "$project" "$skills_dir_override"

@@ -24,9 +24,8 @@ git clone https://github.com/plaited/skills-installer.git
 cd skills-installer
 ./install.sh                              # Interactive mode
 ./install.sh --agent gemini               # Install all for Gemini CLI
-./install.sh --agent cursor --project acp-harness  # Specific project
+./install.sh --agent cursor --project agent-eval-harness  # Specific project
 ./install.sh --list                       # List available projects
-./install.sh --update                     # Update existing
 ./install.sh --uninstall                  # Remove all
 ```
 
@@ -50,7 +49,7 @@ cd skills-installer
 | Project | Source |
 |---------|--------|
 | **development-skills** | [plaited/development-skills](https://github.com/plaited/development-skills) |
-| **acp-harness** | [plaited/acp-harness](https://github.com/plaited/acp-harness) |
+| **agent-eval-harness** | [plaited/agent-eval-harness](https://github.com/plaited/agent-eval-harness) |
 | **plaited** | [plaited/plaited](https://github.com/plaited/plaited) |
 
 ## Skill Scoping
@@ -88,7 +87,7 @@ Development tools including:
 
 **Source:** [plaited/development-skills](https://github.com/plaited/development-skills)
 
-### acp-harness
+### agent-eval-harness
 
 Unified toolkit for ACP client usage and agent evaluation:
 
@@ -96,7 +95,7 @@ Unified toolkit for ACP client usage and agent evaluation:
 - Capture full trajectories (tools, thoughts, plans)
 - Run evaluations and generate training data
 
-**Source:** [plaited/acp-harness](https://github.com/plaited/acp-harness)
+**Source:** [plaited/agent-eval-harness](https://github.com/plaited/agent-eval-harness)
 
 ### plaited
 
