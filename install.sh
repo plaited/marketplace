@@ -139,22 +139,36 @@ warn_jq_fallback() {
   fi
 }
 
-# Get all project names from projects.json
+# Cache for project names (avoids re-parsing projects.json on every call)
+CACHED_PROJECT_NAMES=""
+
+# Get all project names from projects.json (cached for performance)
 get_project_names() {
+  # Return cached result if available
+  if [ -n "$CACHED_PROJECT_NAMES" ]; then
+    echo "$CACHED_PROJECT_NAMES"
+    return 0
+  fi
+
+  local names
   if has_jq; then
-    jq -r '.projects[].name' "$PROJECTS_JSON"
+    names=$(jq -r '.projects[].name' "$PROJECTS_JSON")
   else
     warn_jq_fallback
     # Fallback: parse with awk
-    awk '
+    names=$(awk '
       /"projects"[[:space:]]*:/ { in_projects=1 }
       in_projects && /"name"[[:space:]]*:/ {
         gsub(/.*"name"[[:space:]]*:[[:space:]]*"/, "")
         gsub(/".*/, "")
         print
       }
-    ' "$PROJECTS_JSON"
+    ' "$PROJECTS_JSON")
   fi
+
+  # Cache the result
+  CACHED_PROJECT_NAMES="$names"
+  echo "$names"
 }
 
 # Get repository path for a project
@@ -218,6 +232,40 @@ validate_scope_component() {
   return 0
 }
 
+# Validate sparse_path content for security
+# Prevents command injection and path traversal attacks
+validate_sparse_path() {
+  local sparse_path="$1"
+
+  # Reject empty
+  if [ -z "$sparse_path" ]; then
+    return 1
+  fi
+
+  # Reject path traversal sequences
+  if [[ "$sparse_path" =~ \.\. ]]; then
+    return 1
+  fi
+
+  # Reject absolute paths
+  if [[ "$sparse_path" =~ ^/ ]]; then
+    return 1
+  fi
+
+  # Reject shell special characters that could enable command injection
+  # This includes: $, `, (, ), |, &, ;, <, >, ', ", \, !, space, tab, newline
+  if [[ "$sparse_path" =~ [\$\`\(\)\|\&\;\<\>\'\"\\\!\[:space:]] ]]; then
+    return 1
+  fi
+
+  # Only allow safe characters: alphanumeric, dots, hyphens, underscores, forward slashes
+  if [[ "$sparse_path" =~ [^a-zA-Z0-9._/-] ]]; then
+    return 1
+  fi
+
+  return 0
+}
+
 # Validate that a target path is safely within a parent directory
 # Prevents path traversal attacks before rm -rf operations
 validate_path_within_dir() {
@@ -238,18 +286,20 @@ validate_path_within_dir() {
 
   # Target must be direct child of parent (parent_dir/basename)
   local expected_target="$resolved_parent/$basename"
-  local actual_target
-  # Normalize the target path by removing any ../ sequences
-  actual_target=$(cd "$parent_dir" && cd "$(dirname "$target_path")" 2>/dev/null && pwd -P)/$(basename "$target_path")
 
-  # If we can't resolve, check simpler: target should equal parent/basename
-  if [ -z "$actual_target" ]; then
-    # Fallback: just verify target_path equals skills_dir/basename
-    [ "$target_path" = "$resolved_parent/$basename" ]
-    return $?
+  # Resolve dirname of target_path from original working directory
+  # This handles both relative and absolute paths correctly
+  local target_dirname
+  target_dirname=$(cd "$(dirname "$target_path")" 2>/dev/null && pwd -P)
+
+  # If dirname resolution failed (directory doesn't exist), reject
+  # This is a security measure - we only accept paths where the parent exists
+  if [ -z "$target_dirname" ]; then
+    return 1
   fi
 
-  # Check resolved paths match
+  # Construct and compare canonical paths
+  local actual_target="$target_dirname/$basename"
   [ "$actual_target" = "$expected_target" ]
 }
 
@@ -294,6 +344,135 @@ get_skill_scope_prefix() {
   echo "${org}_${project_name}"
 }
 
+
+# ============================================================================
+# Dependency Detection and Tracking
+# ============================================================================
+
+# Track which projects have been installed to prevent infinite loops
+INSTALLED_PROJECTS=""
+# Track which projects failed to install (to avoid retry loops and report at end)
+FAILED_PROJECTS=""
+
+# Check if a project has already been installed in this session
+is_project_installed() {
+  local project="$1"
+  [[ " $INSTALLED_PROJECTS " =~ " $project " ]]
+}
+
+# Check if a project has already failed in this session
+is_project_failed() {
+  local project="$1"
+  [[ " $FAILED_PROJECTS " =~ " $project " ]]
+}
+
+# Mark a project as installed
+mark_project_installed() {
+  INSTALLED_PROJECTS="$INSTALLED_PROJECTS $1"
+}
+
+# Mark a project as failed
+mark_project_failed() {
+  FAILED_PROJECTS="$FAILED_PROJECTS $1"
+}
+
+# Check if a scoped skill references a project in projects.json
+# Returns the project name if found, empty otherwise
+# Example: "typescript-lsp@plaited_development-skills" -> "development-skills"
+get_skill_source_project() {
+  local skill_name="$1"  # e.g., "typescript-lsp@plaited_development-skills"
+
+  # Only process scoped skills (validates format: name@org_project)
+  if ! is_scoped_skill "$skill_name"; then
+    echo ""
+    return 1
+  fi
+
+  # Extract scope part (after @)
+  local scope_part="${skill_name##*@}"  # "plaited_development-skills"
+
+  # Validate scope contains underscore (org_project format)
+  if [[ ! "$scope_part" =~ _ ]]; then
+    echo ""
+    return 1
+  fi
+
+  # Extract project name (after first underscore)
+  local project_name="${scope_part#*_}" # "development-skills"
+
+  # Validate extracted project name is not empty
+  if [ -z "$project_name" ]; then
+    echo ""
+    return 1
+  fi
+
+  # Check if this project exists in projects.json
+  local known_projects
+  known_projects=$(get_project_names)
+  for known in $known_projects; do
+    if [ "$known" = "$project_name" ]; then
+      echo "$project_name"
+      return 0
+    fi
+  done
+
+  echo ""
+  return 1
+}
+
+# Scan a project's skills directory for dependencies (referenced projects)
+# Returns space-separated list of project names that should be installed first
+get_project_dependencies() {
+  local project_temp="$1"
+
+  # Check .sparse_path file exists
+  if [ ! -f "$project_temp/.sparse_path" ]; then
+    print_info "No .sparse_path file found in $project_temp"
+    echo ""
+    return 0
+  fi
+
+  local sparse_path
+  sparse_path=$(cat "$project_temp/.sparse_path")
+
+  # Security: validate sparse_path content
+  if ! validate_sparse_path "$sparse_path"; then
+    print_error "Invalid .sparse_path content in $project_temp (security check failed)"
+    echo ""
+    return 1
+  fi
+
+  local source_skills="$project_temp/$sparse_path/skills"
+  local dependencies=""
+
+  if [ ! -d "$source_skills" ]; then
+    print_info "No skills directory found at $source_skills"
+    echo ""
+    return 0
+  fi
+
+  for skill_folder in "$source_skills"/*; do
+    [ -d "$skill_folder" ] || continue
+    local skill_name
+    skill_name=$(basename "$skill_folder")
+
+    # Check if this scoped skill references a known project
+    local source_project
+    source_project=$(get_skill_source_project "$skill_name")
+    if [ -n "$source_project" ]; then
+      # Add to dependencies if not already there
+      if ! [[ " $dependencies " =~ " $source_project " ]]; then
+        dependencies="$dependencies $source_project"
+      fi
+    fi
+  done
+
+  echo "$dependencies"
+}
+
+# ============================================================================
+# Scoped Content Removal
+# ============================================================================
 
 # Remove all scoped skills for a project
 # Used by both update and uninstall operations
@@ -466,6 +645,12 @@ install_project() {
   local sparse_path
   sparse_path=$(cat "$project_temp/.sparse_path")
 
+  # Security: validate sparse_path content
+  if ! validate_sparse_path "$sparse_path"; then
+    print_error "Invalid .sparse_path content for $project_name (security check failed)"
+    return 1
+  fi
+
   local source_skills="$project_temp/$sparse_path/skills"
 
   # Get repo for skill scoping
@@ -488,7 +673,15 @@ install_project() {
       # Determine target path
       local target_path
       if is_scoped_skill "$skill_name"; then
-        # Already scoped - copy as-is (inherited skill)
+        # Check if this inherited skill comes from a project we'll install separately
+        local source_project
+        source_project=$(get_skill_source_project "$skill_name")
+        if [ -n "$source_project" ]; then
+          # Skip - this skill will be (or was) installed from its source project
+          print_info "  Skipped: $skill_name (will install from $source_project)"
+          continue
+        fi
+        # Already scoped but from unknown source - copy as-is
         target_path="$skills_dir/$skill_name"
       else
         # Not scoped - rename with scope
@@ -579,6 +772,65 @@ install_project() {
 # Main Installation
 # ============================================================================
 
+# Install a project with its dependencies (recursive)
+# This function handles the recursive dependency resolution
+install_project_with_dependencies() {
+  local project_name="$1"
+  local skills_dir="$2"
+
+  # Skip if already installed in this session
+  if is_project_installed "$project_name"; then
+    return 0
+  fi
+
+  # Skip if already failed (prevents retry loops)
+  if is_project_failed "$project_name"; then
+    return 1
+  fi
+
+  # Get repo and clone
+  local source
+  source=$(get_project_repo "$project_name")
+  if [ -z "$source" ]; then
+    print_error "Could not find source for $project_name"
+    mark_project_failed "$project_name"
+    return 1
+  fi
+
+  if ! clone_project "$project_name" "$source"; then
+    mark_project_failed "$project_name"
+    return 1
+  fi
+
+  # Detect dependencies from scoped skills in this project
+  local project_temp="$TEMP_DIR/$project_name"
+  local dependencies
+  dependencies=$(get_project_dependencies "$project_temp")
+
+  # Install dependencies first (recursively)
+  local dep_failed=false
+  for dep in $dependencies; do
+    if ! is_project_installed "$dep" && ! is_project_failed "$dep"; then
+      print_info "Installing dependency: $dep (required by $project_name)"
+      if ! install_project_with_dependencies "$dep" "$skills_dir"; then
+        print_error "Failed to install dependency $dep for $project_name"
+        dep_failed=true
+        # Continue - the inherited skills will be skipped
+      fi
+    fi
+  done
+
+  # Now install this project's skills
+  install_project "$project_name" "$skills_dir"
+  mark_project_installed "$project_name"
+
+  # Return failure status if any dependencies failed (for reporting)
+  if [ "$dep_failed" = true ]; then
+    return 2  # Partial success - project installed but some deps failed
+  fi
+  return 0
+}
+
 do_install() {
   local agent="$1"
   local specific_project="$2"
@@ -604,6 +856,10 @@ do_install() {
   TEMP_DIR=$(mktemp -d)
   mkdir -p "$skills_dir"
 
+  # Reset tracking for this session
+  INSTALLED_PROJECTS=""
+  FAILED_PROJECTS=""
+
   local projects_installed=0
 
   # Get all project names
@@ -616,18 +872,22 @@ do_install() {
       continue
     fi
 
-    local source
-    source=$(get_project_repo "$project_name")
-
-    if [ -z "$source" ]; then
-      print_error "Could not find source for $project_name"
+    # Skip if already installed as a dependency
+    if is_project_installed "$project_name"; then
+      projects_installed=$((projects_installed + 1))
       continue
     fi
 
-    if ! clone_project "$project_name" "$source"; then
+    # Install project with dependencies
+    # Return codes: 0=success, 1=failure, 2=partial (project ok, some deps failed)
+    install_project_with_dependencies "$project_name" "$skills_dir"
+    local install_result=$?
+
+    if [ "$install_result" -eq 1 ]; then
+      # Complete failure - skip this project
       continue
     fi
-    install_project "$project_name" "$skills_dir"
+    # Return 0 or 2 both mean the project was installed
     projects_installed=$((projects_installed + 1))
   done
 
@@ -649,6 +909,17 @@ do_install() {
   echo "  Projects installed: $projects_installed"
   echo ""
   echo "  Location: $skills_dir/"
+
+  # Report any failed dependencies
+  if [ -n "$FAILED_PROJECTS" ]; then
+    echo ""
+    echo "  Warning: Some dependencies failed to install:"
+    for failed in $FAILED_PROJECTS; do
+      echo "    - $failed"
+    done
+    echo ""
+    echo "  Some inherited skills may be missing. Re-run to retry."
+  fi
   echo ""
   echo "  Next steps:"
   echo "    1. Restart your AI coding agent to load the new skills"

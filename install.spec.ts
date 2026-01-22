@@ -1953,3 +1953,864 @@ fi
     await rm(tmpDir, { recursive: true, force: true });
   });
 });
+
+describe("install.sh - path validation with relative skills_dir (Issue #9 fix)", () => {
+  const tmpDir = join(import.meta.dir, ".test-tmp-issue9");
+
+  test("validates target path when skills_dir is relative", async () => {
+    const { mkdir, rm } = await import("fs/promises");
+
+    // Create test directories to simulate real scenario
+    const testDir = join(tmpDir, "project");
+    const skillsDir = join(testDir, ".claude", "skills");
+    await mkdir(skillsDir, { recursive: true });
+
+    // Test from within the project directory with relative path
+    const script = `
+cd "${testDir}"
+
+validate_path_within_dir() {
+  local parent_dir="$1"
+  local target_path="$2"
+
+  local resolved_parent
+  resolved_parent=$(cd "$parent_dir" 2>/dev/null && pwd -P)
+  [ -z "$resolved_parent" ] && return 1
+
+  local basename
+  basename=$(basename "$target_path")
+  if [[ "$basename" =~ / ]] || [[ "$basename" =~ \\.\\. ]] || [ -z "$basename" ]; then
+    return 1
+  fi
+
+  local expected_target="$resolved_parent/$basename"
+  local actual_target
+  # Fixed: Resolve dirname of target_path from original working directory
+  local target_dirname
+  target_dirname=$(cd "$(dirname "$target_path")" 2>/dev/null && pwd -P)
+  actual_target="$target_dirname/$basename"
+
+  if [ -z "$actual_target" ]; then
+    [ "$target_path" = "$resolved_parent/$basename" ]
+    return $?
+  fi
+
+  [ "$actual_target" = "$expected_target" ]
+}
+
+skills_dir=".claude/skills"
+target_path=".claude/skills/my-skill@org_project"
+
+if validate_path_within_dir "$skills_dir" "$target_path"; then
+  echo "VALIDATION_PASSED"
+else
+  echo "VALIDATION_FAILED"
+fi
+`;
+
+    const result = await $`bash -c ${script}`.quiet();
+    expect(result.text().trim()).toBe("VALIDATION_PASSED");
+
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  test("still rejects traversal attempts with relative skills_dir", async () => {
+    const { mkdir, rm } = await import("fs/promises");
+
+    const testDir = join(tmpDir, "project-traversal");
+    const skillsDir = join(testDir, ".claude", "skills");
+    await mkdir(skillsDir, { recursive: true });
+
+    const script = `
+cd "${testDir}"
+
+validate_path_within_dir() {
+  local parent_dir="$1"
+  local target_path="$2"
+
+  local resolved_parent
+  resolved_parent=$(cd "$parent_dir" 2>/dev/null && pwd -P)
+  [ -z "$resolved_parent" ] && return 1
+
+  local basename
+  basename=$(basename "$target_path")
+  if [[ "$basename" =~ / ]] || [[ "$basename" =~ \\.\\. ]] || [ -z "$basename" ]; then
+    return 1
+  fi
+
+  local expected_target="$resolved_parent/$basename"
+  local actual_target
+  local target_dirname
+  target_dirname=$(cd "$(dirname "$target_path")" 2>/dev/null && pwd -P)
+  actual_target="$target_dirname/$basename"
+
+  if [ -z "$actual_target" ]; then
+    [ "$target_path" = "$resolved_parent/$basename" ]
+    return $?
+  fi
+
+  [ "$actual_target" = "$expected_target" ]
+}
+
+skills_dir=".claude/skills"
+
+# Test 1: path with .. in basename should be rejected
+if validate_path_within_dir "$skills_dir" ".claude/skills/.."; then
+  echo "DOTDOT_ALLOWED"
+else
+  echo "DOTDOT_BLOCKED"
+fi
+
+# Test 2: traversal path should be rejected (actual_target won't match expected)
+if validate_path_within_dir "$skills_dir" ".claude/skills/../../../etc/passwd"; then
+  echo "TRAVERSAL_ALLOWED"
+else
+  echo "TRAVERSAL_BLOCKED"
+fi
+`;
+
+    const result = await $`bash -c ${script}`.quiet();
+    const output = result.text().trim();
+    expect(output).toContain("DOTDOT_BLOCKED");
+    expect(output).toContain("TRAVERSAL_BLOCKED");
+
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+});
+
+describe("install.sh - dependency detection functions", () => {
+  const tmpDir = join(import.meta.dir, ".test-tmp-deps");
+
+  describe("get_skill_source_project", () => {
+    async function getSkillSourceProject(skillName: string, projectsJson: string): Promise<string> {
+      const script = `
+PROJECTS_JSON="${projectsJson}"
+
+is_scoped_skill() {
+  local skill_name="$1"
+  [[ "$skill_name" =~ ^[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+_[a-zA-Z0-9._-]+$ ]]
+}
+
+get_project_names() {
+  awk '
+    /"projects"[[:space:]]*:/ { in_projects=1 }
+    in_projects && /"name"[[:space:]]*:/ {
+      gsub(/.*"name"[[:space:]]*:[[:space:]]*"/, "")
+      gsub(/".*/, "")
+      print
+    }
+  ' "$PROJECTS_JSON"
+}
+
+get_skill_source_project() {
+  local skill_name="$1"
+
+  if ! is_scoped_skill "$skill_name"; then
+    echo ""
+    return 1
+  fi
+
+  local scope_part="\${skill_name##*@}"
+  local project_name="\${scope_part#*_}"
+
+  local known_projects
+  known_projects=$(get_project_names)
+  for known in $known_projects; do
+    if [ "$known" = "$project_name" ]; then
+      echo "$project_name"
+      return 0
+    fi
+  done
+
+  echo ""
+  return 1
+}
+
+get_skill_source_project "${skillName}" || true
+`;
+      try {
+        const result = await $`bash -c ${script}`.quiet();
+        return result.text().trim();
+      } catch (error: unknown) {
+        const err = error as { stdout?: { toString(): string } };
+        return err.stdout?.toString().trim() ?? "";
+      }
+    }
+
+    test("detects source project from scoped skill name", async () => {
+      const result = await getSkillSourceProject(
+        "typescript-lsp@plaited_development-skills",
+        PROJECTS_JSON
+      );
+      expect(result).toBe("development-skills");
+    });
+
+    test("returns empty for unscoped skill", async () => {
+      const result = await getSkillSourceProject("typescript-lsp", PROJECTS_JSON);
+      expect(result).toBe("");
+    });
+
+    test("returns empty for scoped skill with unknown project", async () => {
+      const result = await getSkillSourceProject(
+        "my-skill@org_unknown-project",
+        PROJECTS_JSON
+      );
+      expect(result).toBe("");
+    });
+
+    test("detects agent-eval-harness as source project", async () => {
+      const result = await getSkillSourceProject(
+        "some-skill@plaited_agent-eval-harness",
+        PROJECTS_JSON
+      );
+      expect(result).toBe("agent-eval-harness");
+    });
+  });
+
+  describe("project installation tracking", () => {
+    test("is_project_installed returns false for uninstalled project", async () => {
+      const script = `
+INSTALLED_PROJECTS=""
+
+is_project_installed() {
+  local project="$1"
+  [[ " $INSTALLED_PROJECTS " =~ " $project " ]]
+}
+
+if is_project_installed "development-skills"; then
+  echo "INSTALLED"
+else
+  echo "NOT_INSTALLED"
+fi
+`;
+      const result = await $`bash -c ${script}`.quiet();
+      expect(result.text().trim()).toBe("NOT_INSTALLED");
+    });
+
+    test("is_project_installed returns true after marking", async () => {
+      const script = `
+INSTALLED_PROJECTS=""
+
+is_project_installed() {
+  local project="$1"
+  [[ " $INSTALLED_PROJECTS " =~ " $project " ]]
+}
+
+mark_project_installed() {
+  INSTALLED_PROJECTS="$INSTALLED_PROJECTS $1"
+}
+
+mark_project_installed "development-skills"
+
+if is_project_installed "development-skills"; then
+  echo "INSTALLED"
+else
+  echo "NOT_INSTALLED"
+fi
+`;
+      const result = await $`bash -c ${script}`.quiet();
+      expect(result.text().trim()).toBe("INSTALLED");
+    });
+
+    test("tracks multiple installed projects", async () => {
+      const script = `
+INSTALLED_PROJECTS=""
+
+is_project_installed() {
+  local project="$1"
+  [[ " $INSTALLED_PROJECTS " =~ " $project " ]]
+}
+
+mark_project_installed() {
+  INSTALLED_PROJECTS="$INSTALLED_PROJECTS $1"
+}
+
+mark_project_installed "project-a"
+mark_project_installed "project-b"
+mark_project_installed "project-c"
+
+results=""
+if is_project_installed "project-a"; then results="$results A"; fi
+if is_project_installed "project-b"; then results="$results B"; fi
+if is_project_installed "project-c"; then results="$results C"; fi
+if is_project_installed "project-d"; then results="$results D"; fi
+
+echo "$results"
+`;
+      const result = await $`bash -c ${script}`.quiet();
+      expect(result.text().trim()).toBe("A B C");
+    });
+  });
+
+  describe("get_project_dependencies", () => {
+    test("detects dependencies from scoped skills", async () => {
+      const { mkdir, rm, writeFile } = await import("fs/promises");
+
+      const projectTemp = join(tmpDir, "test-project");
+      const skillsDir = join(projectTemp, ".claude", "skills");
+      await mkdir(skillsDir, { recursive: true });
+      await writeFile(join(projectTemp, ".sparse_path"), ".claude");
+
+      // Create scoped skill folders (inherited skills)
+      await mkdir(join(skillsDir, "typescript-lsp@plaited_development-skills"), { recursive: true });
+      await mkdir(join(skillsDir, "code-review@plaited_development-skills"), { recursive: true });
+      await mkdir(join(skillsDir, "own-skill"), { recursive: true }); // unscoped
+
+      const script = `
+PROJECTS_JSON="${PROJECTS_JSON}"
+
+is_scoped_skill() {
+  local skill_name="$1"
+  [[ "$skill_name" =~ ^[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+_[a-zA-Z0-9._-]+$ ]]
+}
+
+get_project_names() {
+  awk '
+    /"projects"[[:space:]]*:/ { in_projects=1 }
+    in_projects && /"name"[[:space:]]*:/ {
+      gsub(/.*"name"[[:space:]]*:[[:space:]]*"/, "")
+      gsub(/".*/, "")
+      print
+    }
+  ' "$PROJECTS_JSON"
+}
+
+get_skill_source_project() {
+  local skill_name="$1"
+
+  if ! is_scoped_skill "$skill_name"; then
+    echo ""
+    return 1
+  fi
+
+  local scope_part="\${skill_name##*@}"
+  local project_name="\${scope_part#*_}"
+
+  local known_projects
+  known_projects=$(get_project_names)
+  for known in $known_projects; do
+    if [ "$known" = "$project_name" ]; then
+      echo "$project_name"
+      return 0
+    fi
+  done
+
+  echo ""
+  return 1
+}
+
+get_project_dependencies() {
+  local project_temp="$1"
+  local sparse_path
+  sparse_path=$(cat "$project_temp/.sparse_path")
+  local source_skills="$project_temp/$sparse_path/skills"
+  local dependencies=""
+
+  if [ ! -d "$source_skills" ]; then
+    echo ""
+    return 0
+  fi
+
+  for skill_folder in "$source_skills"/*; do
+    [ -d "$skill_folder" ] || continue
+    local skill_name
+    skill_name=$(basename "$skill_folder")
+
+    local source_project
+    source_project=$(get_skill_source_project "$skill_name")
+    if [ -n "$source_project" ]; then
+      if ! [[ " $dependencies " =~ " $source_project " ]]; then
+        dependencies="$dependencies $source_project"
+      fi
+    fi
+  done
+
+  echo "$dependencies"
+}
+
+get_project_dependencies "${projectTemp}"
+`;
+
+      const result = await $`bash -c ${script}`.quiet();
+      expect(result.text().trim()).toBe("development-skills");
+
+      await rm(tmpDir, { recursive: true, force: true });
+    });
+
+    test("returns empty for project with no dependencies", async () => {
+      const { mkdir, rm, writeFile } = await import("fs/promises");
+
+      const projectTemp = join(tmpDir, "no-deps-project");
+      const skillsDir = join(projectTemp, ".claude", "skills");
+      await mkdir(skillsDir, { recursive: true });
+      await writeFile(join(projectTemp, ".sparse_path"), ".claude");
+
+      // Create only unscoped skills (no inherited dependencies)
+      await mkdir(join(skillsDir, "skill-a"), { recursive: true });
+      await mkdir(join(skillsDir, "skill-b"), { recursive: true });
+
+      const script = `
+PROJECTS_JSON="${PROJECTS_JSON}"
+
+is_scoped_skill() {
+  local skill_name="$1"
+  [[ "$skill_name" =~ ^[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+_[a-zA-Z0-9._-]+$ ]]
+}
+
+get_project_names() {
+  awk '
+    /"projects"[[:space:]]*:/ { in_projects=1 }
+    in_projects && /"name"[[:space:]]*:/ {
+      gsub(/.*"name"[[:space:]]*:[[:space:]]*"/, "")
+      gsub(/".*/, "")
+      print
+    }
+  ' "$PROJECTS_JSON"
+}
+
+get_skill_source_project() {
+  local skill_name="$1"
+
+  if ! is_scoped_skill "$skill_name"; then
+    echo ""
+    return 1
+  fi
+
+  local scope_part="\${skill_name##*@}"
+  local project_name="\${scope_part#*_}"
+
+  local known_projects
+  known_projects=$(get_project_names)
+  for known in $known_projects; do
+    if [ "$known" = "$project_name" ]; then
+      echo "$project_name"
+      return 0
+    fi
+  done
+
+  echo ""
+  return 1
+}
+
+get_project_dependencies() {
+  local project_temp="$1"
+  local sparse_path
+  sparse_path=$(cat "$project_temp/.sparse_path")
+  local source_skills="$project_temp/$sparse_path/skills"
+  local dependencies=""
+
+  if [ ! -d "$source_skills" ]; then
+    echo ""
+    return 0
+  fi
+
+  for skill_folder in "$source_skills"/*; do
+    [ -d "$skill_folder" ] || continue
+    local skill_name
+    skill_name=$(basename "$skill_folder")
+
+    local source_project
+    source_project=$(get_skill_source_project "$skill_name")
+    if [ -n "$source_project" ]; then
+      if ! [[ " $dependencies " =~ " $source_project " ]]; then
+        dependencies="$dependencies $source_project"
+      fi
+    fi
+  done
+
+  echo "$dependencies"
+}
+
+get_project_dependencies "${projectTemp}"
+`;
+
+      const result = await $`bash -c ${script}`.quiet();
+      expect(result.text().trim()).toBe("");
+
+      await rm(tmpDir, { recursive: true, force: true });
+    });
+
+    test("deduplicates multiple skills from same source project", async () => {
+      const { mkdir, rm, writeFile } = await import("fs/promises");
+
+      const projectTemp = join(tmpDir, "dedup-project");
+      const skillsDir = join(projectTemp, ".claude", "skills");
+      await mkdir(skillsDir, { recursive: true });
+      await writeFile(join(projectTemp, ".sparse_path"), ".claude");
+
+      // Create multiple skills from the same source project
+      await mkdir(join(skillsDir, "skill-a@plaited_development-skills"), { recursive: true });
+      await mkdir(join(skillsDir, "skill-b@plaited_development-skills"), { recursive: true });
+      await mkdir(join(skillsDir, "skill-c@plaited_development-skills"), { recursive: true });
+
+      const script = `
+PROJECTS_JSON="${PROJECTS_JSON}"
+
+is_scoped_skill() {
+  local skill_name="$1"
+  [[ "$skill_name" =~ ^[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+_[a-zA-Z0-9._-]+$ ]]
+}
+
+get_project_names() {
+  awk '
+    /"projects"[[:space:]]*:/ { in_projects=1 }
+    in_projects && /"name"[[:space:]]*:/ {
+      gsub(/.*"name"[[:space:]]*:[[:space:]]*"/, "")
+      gsub(/".*/, "")
+      print
+    }
+  ' "$PROJECTS_JSON"
+}
+
+get_skill_source_project() {
+  local skill_name="$1"
+
+  if ! is_scoped_skill "$skill_name"; then
+    echo ""
+    return 1
+  fi
+
+  local scope_part="\${skill_name##*@}"
+  local project_name="\${scope_part#*_}"
+
+  local known_projects
+  known_projects=$(get_project_names)
+  for known in $known_projects; do
+    if [ "$known" = "$project_name" ]; then
+      echo "$project_name"
+      return 0
+    fi
+  done
+
+  echo ""
+  return 1
+}
+
+get_project_dependencies() {
+  local project_temp="$1"
+  local sparse_path
+  sparse_path=$(cat "$project_temp/.sparse_path")
+  local source_skills="$project_temp/$sparse_path/skills"
+  local dependencies=""
+
+  if [ ! -d "$source_skills" ]; then
+    echo ""
+    return 0
+  fi
+
+  for skill_folder in "$source_skills"/*; do
+    [ -d "$skill_folder" ] || continue
+    local skill_name
+    skill_name=$(basename "$skill_folder")
+
+    local source_project
+    source_project=$(get_skill_source_project "$skill_name")
+    if [ -n "$source_project" ]; then
+      if ! [[ " $dependencies " =~ " $source_project " ]]; then
+        dependencies="$dependencies $source_project"
+      fi
+    fi
+  done
+
+  echo "$dependencies"
+}
+
+deps=$(get_project_dependencies "${projectTemp}")
+# Count number of words (should be 1, not 3)
+count=$(echo "$deps" | wc -w | tr -d ' ')
+echo "COUNT:$count DEPS:$deps"
+`;
+
+      const result = await $`bash -c ${script}`.quiet();
+      const output = result.text().trim();
+      expect(output).toContain("COUNT:1");
+      expect(output).toContain("development-skills");
+
+      await rm(tmpDir, { recursive: true, force: true });
+    });
+  });
+});
+
+describe("install.sh - inherited skill skipping", () => {
+  const tmpDir = join(import.meta.dir, ".test-tmp-skip");
+
+  test("skips inherited skills that reference known projects", async () => {
+    const { mkdir, rm, writeFile, readdir } = await import("fs/promises");
+
+    const sourceDir = join(tmpDir, "source-skills");
+    const destDir = join(tmpDir, "dest-skills");
+    await mkdir(sourceDir, { recursive: true });
+    await mkdir(destDir, { recursive: true });
+
+    // Create skill folders: one inherited (should be skipped), one own (should be installed)
+    await mkdir(join(sourceDir, "typescript-lsp@plaited_development-skills"), { recursive: true });
+    await writeFile(
+      join(sourceDir, "typescript-lsp@plaited_development-skills", "index.md"),
+      "# Inherited skill"
+    );
+    await mkdir(join(sourceDir, "own-skill"), { recursive: true });
+    await writeFile(join(sourceDir, "own-skill", "index.md"), "# Own skill");
+
+    const script = `
+PROJECTS_JSON="${PROJECTS_JSON}"
+
+is_scoped_skill() {
+  local skill_name="$1"
+  [[ "$skill_name" =~ ^[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+_[a-zA-Z0-9._-]+$ ]]
+}
+
+get_project_names() {
+  awk '
+    /"projects"[[:space:]]*:/ { in_projects=1 }
+    in_projects && /"name"[[:space:]]*:/ {
+      gsub(/.*"name"[[:space:]]*:[[:space:]]*"/, "")
+      gsub(/".*/, "")
+      print
+    }
+  ' "$PROJECTS_JSON"
+}
+
+get_skill_source_project() {
+  local skill_name="$1"
+
+  if ! is_scoped_skill "$skill_name"; then
+    echo ""
+    return 1
+  fi
+
+  local scope_part="\${skill_name##*@}"
+  local project_name="\${scope_part#*_}"
+
+  local known_projects
+  known_projects=$(get_project_names)
+  for known in $known_projects; do
+    if [ "$known" = "$project_name" ]; then
+      echo "$project_name"
+      return 0
+    fi
+  done
+
+  echo ""
+  return 1
+}
+
+extract_org_from_repo() {
+  local repo="$1"
+  echo "\${repo%%/*}"
+}
+
+get_scoped_skill_name() {
+  local skill_name="$1"
+  local repo="$2"
+  local org project_name
+  org=$(extract_org_from_repo "$repo")
+  project_name="\${repo##*/}"
+  echo "\${skill_name}@\${org}_\${project_name}"
+}
+
+source_skills="${sourceDir}"
+skills_dir="${destDir}"
+repo="plaited/my-project"
+
+for skill_folder in "$source_skills"/*; do
+  [ -d "$skill_folder" ] || continue
+  skill_name=$(basename "$skill_folder")
+
+  if is_scoped_skill "$skill_name"; then
+    source_project=$(get_skill_source_project "$skill_name")
+    if [ -n "$source_project" ]; then
+      echo "SKIPPED: $skill_name (dependency: $source_project)"
+      continue
+    fi
+    target_path="$skills_dir/$skill_name"
+  else
+    scoped_name=$(get_scoped_skill_name "$skill_name" "$repo")
+    target_path="$skills_dir/$scoped_name"
+  fi
+
+  cp -r "$skill_folder" "$target_path"
+  echo "INSTALLED: $(basename "$target_path")"
+done
+`;
+
+    const result = await $`bash -c ${script}`.quiet();
+    const output = result.text().trim();
+
+    expect(output).toContain("SKIPPED: typescript-lsp@plaited_development-skills");
+    expect(output).toContain("INSTALLED: own-skill@plaited_my-project");
+
+    // Verify only own skill was installed
+    const installed = await readdir(destDir);
+    expect(installed).toEqual(["own-skill@plaited_my-project"]);
+
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  test("installs inherited skills from unknown sources", async () => {
+    const { mkdir, rm, writeFile, readdir } = await import("fs/promises");
+
+    const sourceDir = join(tmpDir, "source-unknown");
+    const destDir = join(tmpDir, "dest-unknown");
+    await mkdir(sourceDir, { recursive: true });
+    await mkdir(destDir, { recursive: true });
+
+    // Create skill from unknown source (not in projects.json)
+    await mkdir(join(sourceDir, "external-skill@external-org_unknown-project"), { recursive: true });
+    await writeFile(
+      join(sourceDir, "external-skill@external-org_unknown-project", "index.md"),
+      "# External skill"
+    );
+
+    const script = `
+PROJECTS_JSON="${PROJECTS_JSON}"
+
+is_scoped_skill() {
+  local skill_name="$1"
+  [[ "$skill_name" =~ ^[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+_[a-zA-Z0-9._-]+$ ]]
+}
+
+get_project_names() {
+  awk '
+    /"projects"[[:space:]]*:/ { in_projects=1 }
+    in_projects && /"name"[[:space:]]*:/ {
+      gsub(/.*"name"[[:space:]]*:[[:space:]]*"/, "")
+      gsub(/".*/, "")
+      print
+    }
+  ' "$PROJECTS_JSON"
+}
+
+get_skill_source_project() {
+  local skill_name="$1"
+
+  if ! is_scoped_skill "$skill_name"; then
+    echo ""
+    return 1
+  fi
+
+  local scope_part="\${skill_name##*@}"
+  local project_name="\${scope_part#*_}"
+
+  local known_projects
+  known_projects=$(get_project_names)
+  for known in $known_projects; do
+    if [ "$known" = "$project_name" ]; then
+      echo "$project_name"
+      return 0
+    fi
+  done
+
+  echo ""
+  return 1
+}
+
+source_skills="${sourceDir}"
+skills_dir="${destDir}"
+
+for skill_folder in "$source_skills"/*; do
+  [ -d "$skill_folder" ] || continue
+  skill_name=$(basename "$skill_folder")
+
+  if is_scoped_skill "$skill_name"; then
+    source_project=$(get_skill_source_project "$skill_name")
+    if [ -n "$source_project" ]; then
+      echo "SKIPPED: $skill_name"
+      continue
+    fi
+    # Unknown source - copy as-is
+    target_path="$skills_dir/$skill_name"
+  else
+    target_path="$skills_dir/$skill_name"
+  fi
+
+  cp -r "$skill_folder" "$target_path"
+  echo "INSTALLED: $(basename "$target_path")"
+done
+`;
+
+    const result = await $`bash -c ${script}`.quiet();
+    expect(result.text().trim()).toBe("INSTALLED: external-skill@external-org_unknown-project");
+
+    const installed = await readdir(destDir);
+    expect(installed).toEqual(["external-skill@external-org_unknown-project"]);
+
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+});
+
+describe("install.sh - sparse_path security validation", () => {
+  async function validateSparsePath(sparsePath: string): Promise<boolean> {
+    // Escape the sparse path for safe bash inclusion
+    const escapedPath = sparsePath.replace(/'/g, "'\\''");
+    const script = `
+validate_sparse_path() {
+  local sparse_path="$1"
+
+  if [ -z "$sparse_path" ]; then
+    return 1
+  fi
+
+  if [[ "$sparse_path" =~ \\.\\. ]]; then
+    return 1
+  fi
+
+  if [[ "$sparse_path" =~ ^/ ]]; then
+    return 1
+  fi
+
+  if [[ "$sparse_path" =~ [^a-zA-Z0-9._/-] ]]; then
+    return 1
+  fi
+
+  return 0
+}
+
+validate_sparse_path '${escapedPath}'
+`;
+    try {
+      await $`bash -c ${script}`.quiet();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  test("accepts valid sparse path", async () => {
+    expect(await validateSparsePath(".claude")).toBe(true);
+    expect(await validateSparsePath(".github/skills")).toBe(true);
+    expect(await validateSparsePath("src/skills")).toBe(true);
+    expect(await validateSparsePath("my-project_v2.0")).toBe(true);
+  });
+
+  test("rejects empty sparse path", async () => {
+    expect(await validateSparsePath("")).toBe(false);
+  });
+
+  test("rejects path traversal attempts", async () => {
+    expect(await validateSparsePath("..")).toBe(false);
+    expect(await validateSparsePath("../etc")).toBe(false);
+    expect(await validateSparsePath(".claude/../..")).toBe(false);
+    expect(await validateSparsePath("foo/../../bar")).toBe(false);
+  });
+
+  test("rejects absolute paths", async () => {
+    expect(await validateSparsePath("/etc/passwd")).toBe(false);
+    expect(await validateSparsePath("/")).toBe(false);
+  });
+
+  test("rejects command injection attempts", async () => {
+    expect(await validateSparsePath("; rm -rf /")).toBe(false);
+    expect(await validateSparsePath("$(whoami)")).toBe(false);
+    expect(await validateSparsePath("`id`")).toBe(false);
+    expect(await validateSparsePath("foo|bar")).toBe(false);
+    expect(await validateSparsePath("foo&bar")).toBe(false);
+    expect(await validateSparsePath("foo;bar")).toBe(false);
+  });
+
+  test("rejects special characters", async () => {
+    expect(await validateSparsePath("foo bar")).toBe(false);
+    expect(await validateSparsePath("foo\tbar")).toBe(false);
+    expect(await validateSparsePath("foo'bar")).toBe(false);
+    expect(await validateSparsePath('foo"bar')).toBe(false);
+  });
+});
