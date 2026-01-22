@@ -523,7 +523,11 @@ install_project() {
 
       # Use mktemp for unique temp name (more robust than PID-based naming)
       local temp_dir temp_target
-      temp_dir=$(mktemp -d "${skills_dir}/.install-tmp.XXXXXX")
+      temp_dir=$(mktemp -d "${skills_dir}/.install-tmp.XXXXXX" 2>/dev/null)
+      if [ -z "$temp_dir" ] || [ ! -d "$temp_dir" ]; then
+        print_error "  Failed to create temp directory: $skill_name"
+        continue
+      fi
       temp_target="$temp_dir/$(basename "$target_path")"
 
       if ! cp -r "$skill_folder" "$temp_target"; then

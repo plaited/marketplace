@@ -1136,6 +1136,42 @@ fi
     await rm(tmpDir, { recursive: true, force: true });
   });
 
+  test("handles mktemp failure gracefully", async () => {
+    const { mkdir, rm } = await import("fs/promises");
+
+    const sourceDir = join(tmpDir, "source-mktemp");
+    await mkdir(sourceDir, { recursive: true });
+
+    // Create source skill folder
+    const sourceSkillDir = join(sourceDir, "my-skill");
+    await mkdir(sourceSkillDir, { recursive: true });
+
+    // Use non-existent directory for skills_dir to cause mktemp failure
+    const nonExistentDir = join(tmpDir, "non-existent-dir");
+
+    const script = `
+print_error() { echo "ERROR: $1" >&2; }
+
+skills_dir="${nonExistentDir}"
+skill_name="my-skill"
+
+# Attempt mktemp in non-existent directory (will fail)
+temp_dir=$(mktemp -d "\${skills_dir}/.install-tmp.XXXXXX" 2>/dev/null)
+if [ -z "$temp_dir" ] || [ ! -d "$temp_dir" ]; then
+  print_error "  Failed to create temp directory: $skill_name"
+  echo "MKTEMP_FAILED"
+  exit 0
+fi
+
+echo "MKTEMP_SUCCESS"
+`;
+
+    const result = await $`bash -c ${script}`.quiet();
+    expect(result.text().trim()).toBe("MKTEMP_FAILED");
+
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
   test("path validation rejects traversal attempts", async () => {
     const { mkdir, rm } = await import("fs/promises");
 
