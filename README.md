@@ -75,6 +75,12 @@ If you previously installed skills without scoping, run `--uninstall` first to r
 
 This ensures a clean installation with properly scoped skill names.
 
+### Replace-on-Install Behavior
+
+Running `./install.sh` replaces existing skill folders with fresh copies from the source repository. This ensures skills are always up-to-date but will overwrite any local modifications. The installer will display "Replaced" for skills that were updated and "Installed" for new skills.
+
+**Note:** If you have local modifications you want to preserve, back them up before reinstalling.
+
 ## Project Details
 
 ### development-skills

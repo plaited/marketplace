@@ -465,16 +465,46 @@ install_project() {
         target_path="$skills_dir/$scoped_name"
       fi
 
-      # Remove existing folder if present (replace-on-install behavior)
+      # Check if replacing existing skill
+      local replacing=false
       if [ -d "$target_path" ]; then
-        rm -rf "$target_path"
+        replacing=true
       fi
 
-      cp -r "$skill_folder" "$target_path"
+      # Atomic replace-on-install: copy to temp, remove old, move new
+      local temp_target="${target_path}.tmp.$$"
+      if ! cp -r "$skill_folder" "$temp_target"; then
+        print_error "  Failed to copy: $skill_name"
+        rm -rf "$temp_target" 2>/dev/null
+        continue
+      fi
+
+      if [ "$replacing" = true ]; then
+        if ! rm -rf "$target_path"; then
+          print_error "  Failed to remove existing: $skill_name"
+          rm -rf "$temp_target"
+          continue
+        fi
+      fi
+
+      if ! mv "$temp_target" "$target_path"; then
+        print_error "  Failed to install: $skill_name"
+        rm -rf "$temp_target" 2>/dev/null
+        continue
+      fi
+
+      # Report what was done
+      local display_name
       if is_scoped_skill "$skill_name"; then
-        print_info "  Preserved: $skill_name"
+        display_name="$skill_name"
       else
-        print_info "  Installed: $scoped_name"
+        display_name="$scoped_name"
+      fi
+
+      if [ "$replacing" = true ]; then
+        print_info "  Replaced: $display_name"
+      else
+        print_info "  Installed: $display_name"
       fi
     done
 
