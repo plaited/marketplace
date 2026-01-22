@@ -24,9 +24,8 @@ git clone https://github.com/plaited/skills-installer.git
 cd skills-installer
 ./install.sh                              # Interactive mode
 ./install.sh --agent gemini               # Install all for Gemini CLI
-./install.sh --agent cursor --project acp-harness  # Specific project
+./install.sh --agent cursor --project agent-eval-harness  # Specific project
 ./install.sh --list                       # List available projects
-./install.sh --update                     # Update existing
 ./install.sh --uninstall                  # Remove all
 ```
 
@@ -50,7 +49,7 @@ cd skills-installer
 | Project | Source |
 |---------|--------|
 | **development-skills** | [plaited/development-skills](https://github.com/plaited/development-skills) |
-| **acp-harness** | [plaited/acp-harness](https://github.com/plaited/acp-harness) |
+| **agent-eval-harness** | [plaited/agent-eval-harness](https://github.com/plaited/agent-eval-harness) |
 | **plaited** | [plaited/plaited](https://github.com/plaited/plaited) |
 
 ## Skill Scoping
@@ -76,6 +75,12 @@ If you previously installed skills without scoping, run `--uninstall` first to r
 
 This ensures a clean installation with properly scoped skill names.
 
+### Replace-on-Install Behavior
+
+Running `./install.sh` replaces existing skill folders with fresh copies from the source repository. This ensures skills are always up-to-date but will overwrite any local modifications. The installer will display "Replaced" for skills that were updated and "Installed" for new skills.
+
+**Note:** If you have local modifications you want to preserve, back them up before reinstalling.
+
 ## Project Details
 
 ### development-skills
@@ -88,15 +93,16 @@ Development tools including:
 
 **Source:** [plaited/development-skills](https://github.com/plaited/development-skills)
 
-### acp-harness
+### agent-eval-harness
 
-Unified toolkit for ACP client usage and agent evaluation:
+CLI tool for evaluating AI agents by capturing execution trajectories:
 
-- Connect to ACP-compatible agents programmatically
-- Capture full trajectories (tools, thoughts, plans)
-- Run evaluations and generate training data
+- Capture full execution traces (thoughts, messages, tool calls, plans)
+- Run pass@k evaluations with customizable grading functions
+- Schema-driven adapters for any CLI agent producing JSON output
+- Unix-style composable pipelines (run → extract → grade → format)
 
-**Source:** [plaited/acp-harness](https://github.com/plaited/acp-harness)
+**Source:** [plaited/agent-eval-harness](https://github.com/plaited/agent-eval-harness)
 
 ### plaited
 

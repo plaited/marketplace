@@ -7,7 +7,6 @@
 #   ./install.sh --agent gemini               # Direct: install for Gemini CLI
 #   ./install.sh --project development-skills # Install specific project only
 #   ./install.sh --list                       # List available projects
-#   ./install.sh --update                     # Update existing installation
 #   ./install.sh --uninstall                  # Remove installation
 
 set -e
@@ -217,6 +216,41 @@ validate_scope_component() {
     return 1
   fi
   return 0
+}
+
+# Validate that a target path is safely within a parent directory
+# Prevents path traversal attacks before rm -rf operations
+validate_path_within_dir() {
+  local parent_dir="$1"
+  local target_path="$2"
+
+  # Resolve parent to absolute path
+  local resolved_parent
+  resolved_parent=$(cd "$parent_dir" 2>/dev/null && pwd -P)
+  [ -z "$resolved_parent" ] && return 1
+
+  # Get the basename (skill folder name) and check it's simple (no slashes or ..)
+  local basename
+  basename=$(basename "$target_path")
+  if [[ "$basename" =~ / ]] || [[ "$basename" =~ \.\. ]] || [ -z "$basename" ]; then
+    return 1
+  fi
+
+  # Target must be direct child of parent (parent_dir/basename)
+  local expected_target="$resolved_parent/$basename"
+  local actual_target
+  # Normalize the target path by removing any ../ sequences
+  actual_target=$(cd "$parent_dir" && cd "$(dirname "$target_path")" 2>/dev/null && pwd -P)/$(basename "$target_path")
+
+  # If we can't resolve, check simpler: target should equal parent/basename
+  if [ -z "$actual_target" ]; then
+    # Fallback: just verify target_path equals skills_dir/basename
+    [ "$target_path" = "$resolved_parent/$basename" ]
+    return $?
+  fi
+
+  # Check resolved paths match
+  [ "$actual_target" = "$expected_target" ]
 }
 
 # Extract org from repo path (e.g., "plaited" from "plaited/development-skills")
@@ -451,10 +485,11 @@ install_project() {
       local skill_name
       skill_name=$(basename "$skill_folder")
 
+      # Determine target path
+      local target_path
       if is_scoped_skill "$skill_name"; then
         # Already scoped - copy as-is (inherited skill)
-        cp -r "$skill_folder" "$skills_dir/"
-        print_info "  Preserved: $skill_name"
+        target_path="$skills_dir/$skill_name"
       else
         # Not scoped - rename with scope
         local scoped_name
@@ -462,8 +497,75 @@ install_project() {
           print_error "  Skipped: $skill_name (invalid scope components)"
           continue
         fi
-        cp -r "$skill_folder" "$skills_dir/$scoped_name"
-        print_info "  Installed: $scoped_name"
+        target_path="$skills_dir/$scoped_name"
+      fi
+
+      # Security: validate target path stays within skills_dir before any rm operations
+      if ! validate_path_within_dir "$skills_dir" "$target_path"; then
+        print_error "  Skipped: $skill_name (invalid target path)"
+        continue
+      fi
+
+      # Check if replacing existing skill
+      local replacing=false
+      if [ -d "$target_path" ]; then
+        replacing=true
+      fi
+
+      # Atomic replace-on-install strategy:
+      # 1. Copy new content to temp directory (preserves old if copy fails)
+      # 2. Remove old directory (temp exists if this fails, user can retry)
+      # 3. Move temp to final location (atomic on same filesystem)
+      #
+      # Error recovery: On any failure, we clean up temp and skip this skill.
+      # The worst case is partial state where old was removed but move failed,
+      # leaving no skill installed. Recovery: simply re-run the installer to
+      # complete the installation - it will install the missing skill fresh.
+
+      # Use mktemp for unique temp name (more robust than PID-based naming)
+      local temp_dir temp_target
+      temp_dir=$(mktemp -d "${skills_dir}/.install-tmp.XXXXXX" 2>/dev/null)
+      if [ -z "$temp_dir" ] || [ ! -d "$temp_dir" ]; then
+        print_error "  Failed to create temp directory: $skill_name"
+        continue
+      fi
+      temp_target="$temp_dir/$(basename "$target_path")"
+
+      if ! cp -r "$skill_folder" "$temp_target"; then
+        print_error "  Failed to copy: $skill_name"
+        rm -rf "$temp_dir" 2>/dev/null
+        continue
+      fi
+
+      if [ "$replacing" = true ]; then
+        if ! rm -rf "$target_path"; then
+          print_error "  Failed to remove existing: $skill_name"
+          rm -rf "$temp_dir" 2>/dev/null
+          continue
+        fi
+      fi
+
+      if ! mv "$temp_target" "$target_path"; then
+        print_error "  Failed to install: $skill_name"
+        rm -rf "$temp_dir" 2>/dev/null
+        continue
+      fi
+
+      # Clean up temp directory (now empty after successful mv)
+      rm -rf "$temp_dir" 2>/dev/null
+
+      # Report what was done
+      local display_name
+      if is_scoped_skill "$skill_name"; then
+        display_name="$skill_name"
+      else
+        display_name="$scoped_name"
+      fi
+
+      if [ "$replacing" = true ]; then
+        print_info "  Replaced: $display_name"
+      else
+        print_info "  Installed: $display_name"
       fi
     done
 
@@ -577,50 +679,6 @@ do_list() {
 }
 
 # ============================================================================
-# Update
-# ============================================================================
-
-do_update() {
-  local agent="$1"
-  local specific_project="$2"
-  local skills_dir_override="$3"
-
-  # Use provided agent or detect from existing installation
-  if [ -z "$agent" ]; then
-    agent=$(detect_agent)
-    if [ -z "$agent" ]; then
-      print_error "No existing installation detected"
-      print_info "Run without --update to install, or specify --agent"
-      exit 1
-    fi
-  fi
-
-  print_info "Updating installation for: $agent"
-
-  local skills_dir
-  # Use override if provided, otherwise get from agent
-  if [ -n "$skills_dir_override" ]; then
-    skills_dir="$skills_dir_override"
-  else
-    skills_dir=$(get_skills_dir "$agent")
-  fi
-
-  # Get all project names and remove their skill directories
-  local project_names
-  project_names=$(get_project_names)
-
-  for project_name in $project_names; do
-    if [ -n "$specific_project" ] && [ "$project_name" != "$specific_project" ]; then
-      continue
-    fi
-    remove_project_scoped_content "$agent" "$project_name" "$skills_dir"
-  done
-
-  # Reinstall
-  do_install "$agent" "$specific_project" "$skills_dir_override"
-}
-
-# ============================================================================
 # Uninstall
 # ============================================================================
 
@@ -684,7 +742,6 @@ show_help() {
   echo "  --project <name>     Install specific project only"
   echo "  --skills-dir <path>  Override skills directory"
   echo "  --list               List available projects"
-  echo "  --update             Update existing installation"
   echo "  --uninstall          Remove installation"
   echo "  --help               Show this help message"
   echo ""
@@ -710,7 +767,6 @@ show_help() {
   echo "  ./install.sh --agent gemini               # Install all for Gemini"
   echo "  ./install.sh --agent cursor --project development-skills"
   echo "  ./install.sh --list                       # List available projects"
-  echo "  ./install.sh --update                     # Update existing"
   echo "  ./install.sh --uninstall                  # Remove all"
 }
 
@@ -736,10 +792,6 @@ main() {
         ;;
       --list)
         action="list"
-        shift
-        ;;
-      --update)
-        action="update"
         shift
         ;;
       --uninstall)
@@ -827,9 +879,6 @@ main() {
       fi
 
       do_install "$agent" "$project" "$skills_dir_override"
-      ;;
-    update)
-      do_update "$agent" "$project" "$skills_dir_override"
       ;;
     uninstall)
       do_uninstall "$agent" "$project" "$skills_dir_override"

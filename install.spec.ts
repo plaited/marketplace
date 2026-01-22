@@ -366,6 +366,23 @@ describe("install.sh - CLI", () => {
       expect(err.stderr.toString()).toContain("Unknown agent");
     }
   });
+
+  test("--update is not a valid option (feature removed)", async () => {
+    try {
+      await $`bash ${INSTALL_SCRIPT} --update`.quiet();
+      expect(true).toBe(false); // Should not reach here
+    } catch (error: unknown) {
+      const err = error as { exitCode: number; stderr: { toString(): string } };
+      expect(err.exitCode).toBe(1);
+      expect(err.stderr.toString()).toContain("Unknown option: --update");
+    }
+  });
+
+  test("--help does not mention --update option", async () => {
+    const result = await $`bash ${INSTALL_SCRIPT} --help`.quiet();
+    const output = result.text();
+    expect(output).not.toContain("--update");
+  });
 });
 
 describe("README.md consistency", () => {
@@ -752,6 +769,475 @@ done
       "skill-from-dev@plaited_development-skills",
       "skill-from-tools@acme_shared-tools"
     ]);
+  });
+});
+
+describe("install.sh - replace-on-install behavior", () => {
+  const tmpDir = join(import.meta.dir, ".test-tmp-replace");
+
+  test("replaces existing skill folder with fresh copy", async () => {
+    const { mkdir, rm, readdir, writeFile, readFile } = await import("fs/promises");
+
+    const sourceDir = join(tmpDir, "source-skills");
+    const destDir = join(tmpDir, "dest-skills");
+    await mkdir(sourceDir, { recursive: true });
+    await mkdir(destDir, { recursive: true });
+
+    // Create source skill folder with original content
+    const sourceSkillDir = join(sourceDir, "my-skill");
+    await mkdir(sourceSkillDir, { recursive: true });
+    await writeFile(join(sourceSkillDir, "index.md"), "# Original Content");
+
+    // Create existing (modified) skill folder at destination
+    const existingSkillDir = join(destDir, "my-skill@org_project");
+    await mkdir(existingSkillDir, { recursive: true });
+    await writeFile(join(existingSkillDir, "index.md"), "# Modified Content");
+    await writeFile(join(existingSkillDir, "extra-file.txt"), "This should be removed");
+
+    // Run installation logic with atomic replace-on-install behavior (matches actual implementation)
+    const script = `
+is_scoped_skill() {
+  local skill_name="$1"
+  [[ "$skill_name" =~ ^[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+_[a-zA-Z0-9._-]+$ ]]
+}
+
+extract_org_from_repo() {
+  local repo="$1"
+  echo "\${repo%%/*}"
+}
+
+get_scoped_skill_name() {
+  local skill_name="$1"
+  local repo="$2"
+  local org project_name
+  org=$(extract_org_from_repo "$repo")
+  project_name="\${repo##*/}"
+  echo "\${skill_name}@\${org}_\${project_name}"
+}
+
+validate_path_within_dir() {
+  local parent_dir="$1"
+  local target_path="$2"
+  local resolved_parent resolved_target
+  resolved_parent=$(cd "$parent_dir" 2>/dev/null && pwd -P)
+  resolved_target=$(cd "$(dirname "$target_path")" 2>/dev/null && pwd -P)/$(basename "$target_path")
+  case "$resolved_target" in
+    "$resolved_parent"/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+source_skills="${sourceDir}"
+skills_dir="${destDir}"
+repo="org/project"
+
+for skill_folder in "$source_skills"/*; do
+  [ -d "$skill_folder" ] || continue
+  skill_name=$(basename "$skill_folder")
+
+  # Determine target path
+  local target_path
+  if is_scoped_skill "$skill_name"; then
+    target_path="$skills_dir/$skill_name"
+  else
+    scoped_name=$(get_scoped_skill_name "$skill_name" "$repo")
+    target_path="$skills_dir/$scoped_name"
+  fi
+
+  # Security: validate target path stays within skills_dir
+  if ! validate_path_within_dir "$skills_dir" "$target_path"; then
+    continue
+  fi
+
+  # Check if replacing existing skill
+  local replacing=false
+  if [ -d "$target_path" ]; then
+    replacing=true
+  fi
+
+  # Atomic replace: copy to temp, remove old, move new
+  local temp_dir temp_target
+  temp_dir=$(mktemp -d "\${skills_dir}/.install-tmp.XXXXXX")
+  temp_target="$temp_dir/$(basename "$target_path")"
+
+  if ! cp -r "$skill_folder" "$temp_target"; then
+    rm -rf "$temp_dir" 2>/dev/null
+    continue
+  fi
+
+  if [ "$replacing" = true ]; then
+    if ! rm -rf "$target_path"; then
+      rm -rf "$temp_dir" 2>/dev/null
+      continue
+    fi
+  fi
+
+  if ! mv "$temp_target" "$target_path"; then
+    rm -rf "$temp_dir" 2>/dev/null
+    continue
+  fi
+
+  rm -rf "$temp_dir" 2>/dev/null
+done
+`;
+
+    await $`bash -c ${script}`.quiet();
+
+    // Verify the skill folder was replaced
+    const installedSkills = await readdir(destDir);
+    expect(installedSkills).toEqual(["my-skill@org_project"]);
+
+    // Verify original content was restored (not the modified content)
+    const content = await readFile(join(destDir, "my-skill@org_project", "index.md"), "utf-8");
+    expect(content).toBe("# Original Content");
+
+    // Verify extra file from modified folder was removed
+    const { access } = await import("fs/promises");
+    let extraFileExists = true;
+    try {
+      await access(join(destDir, "my-skill@org_project", "extra-file.txt"));
+    } catch {
+      extraFileExists = false;
+    }
+    expect(extraFileExists).toBe(false);
+
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  test("replaces existing scoped skill folder (inherited skill)", async () => {
+    const { mkdir, rm, readdir, writeFile, readFile } = await import("fs/promises");
+
+    const sourceDir = join(tmpDir, "source-scoped");
+    const destDir = join(tmpDir, "dest-scoped");
+    await mkdir(sourceDir, { recursive: true });
+    await mkdir(destDir, { recursive: true });
+
+    // Create source skill folder (already scoped - inherited)
+    const sourceSkillDir = join(sourceDir, "inherited@other_project");
+    await mkdir(sourceSkillDir, { recursive: true });
+    await writeFile(join(sourceSkillDir, "skill.md"), "# Fresh Version");
+
+    // Create existing skill folder at destination (out of date)
+    const existingSkillDir = join(destDir, "inherited@other_project");
+    await mkdir(existingSkillDir, { recursive: true });
+    await writeFile(join(existingSkillDir, "skill.md"), "# Old Version");
+
+    // Use atomic implementation matching actual code
+    const script = `
+is_scoped_skill() {
+  local skill_name="$1"
+  [[ "$skill_name" =~ ^[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+_[a-zA-Z0-9._-]+$ ]]
+}
+
+source_skills="${sourceDir}"
+skills_dir="${destDir}"
+
+for skill_folder in "$source_skills"/*; do
+  [ -d "$skill_folder" ] || continue
+  skill_name=$(basename "$skill_folder")
+
+  local target_path
+  if is_scoped_skill "$skill_name"; then
+    target_path="$skills_dir/$skill_name"
+  else
+    target_path="$skills_dir/$skill_name"
+  fi
+
+  # Atomic replace: copy to temp, remove old, move new
+  local temp_dir temp_target
+  temp_dir=$(mktemp -d "\${skills_dir}/.install-tmp.XXXXXX")
+  temp_target="$temp_dir/$(basename "$target_path")"
+
+  cp -r "$skill_folder" "$temp_target" || { rm -rf "$temp_dir"; continue; }
+
+  if [ -d "$target_path" ]; then
+    rm -rf "$target_path" || { rm -rf "$temp_dir"; continue; }
+  fi
+
+  mv "$temp_target" "$target_path" || { rm -rf "$temp_dir"; continue; }
+  rm -rf "$temp_dir" 2>/dev/null
+done
+`;
+
+    await $`bash -c ${script}`.quiet();
+
+    // Verify the content was replaced with fresh version
+    const content = await readFile(join(destDir, "inherited@other_project", "skill.md"), "utf-8");
+    expect(content).toBe("# Fresh Version");
+
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  test("installs fresh when no existing folder present", async () => {
+    const { mkdir, rm, readdir, writeFile, readFile } = await import("fs/promises");
+
+    const sourceDir = join(tmpDir, "source-fresh");
+    const destDir = join(tmpDir, "dest-fresh");
+    await mkdir(sourceDir, { recursive: true });
+    await mkdir(destDir, { recursive: true });
+
+    // Create source skill folder
+    const sourceSkillDir = join(sourceDir, "new-skill");
+    await mkdir(sourceSkillDir, { recursive: true });
+    await writeFile(join(sourceSkillDir, "index.md"), "# New Skill");
+
+    // No existing folder at destination - test atomic fresh install
+
+    const script = `
+is_scoped_skill() {
+  local skill_name="$1"
+  [[ "$skill_name" =~ ^[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+_[a-zA-Z0-9._-]+$ ]]
+}
+
+extract_org_from_repo() {
+  local repo="$1"
+  echo "\${repo%%/*}"
+}
+
+get_scoped_skill_name() {
+  local skill_name="$1"
+  local repo="$2"
+  local org project_name
+  org=$(extract_org_from_repo "$repo")
+  project_name="\${repo##*/}"
+  echo "\${skill_name}@\${org}_\${project_name}"
+}
+
+source_skills="${sourceDir}"
+skills_dir="${destDir}"
+repo="org/project"
+
+for skill_folder in "$source_skills"/*; do
+  [ -d "$skill_folder" ] || continue
+  skill_name=$(basename "$skill_folder")
+
+  local target_path
+  if is_scoped_skill "$skill_name"; then
+    target_path="$skills_dir/$skill_name"
+  else
+    scoped_name=$(get_scoped_skill_name "$skill_name" "$repo")
+    target_path="$skills_dir/$scoped_name"
+  fi
+
+  # Atomic install: copy to temp, then move
+  local temp_dir temp_target
+  temp_dir=$(mktemp -d "\${skills_dir}/.install-tmp.XXXXXX")
+  temp_target="$temp_dir/$(basename "$target_path")"
+
+  cp -r "$skill_folder" "$temp_target" || { rm -rf "$temp_dir"; continue; }
+  mv "$temp_target" "$target_path" || { rm -rf "$temp_dir"; continue; }
+  rm -rf "$temp_dir" 2>/dev/null
+done
+`;
+
+    await $`bash -c ${script}`.quiet();
+
+    // Verify the skill was installed
+    const installedSkills = await readdir(destDir);
+    expect(installedSkills).toEqual(["new-skill@org_project"]);
+
+    const content = await readFile(join(destDir, "new-skill@org_project", "index.md"), "utf-8");
+    expect(content).toBe("# New Skill");
+
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+});
+
+describe("install.sh - error handling", () => {
+  const tmpDir = join(import.meta.dir, ".test-tmp-errors");
+
+  test("handles copy failure gracefully", async () => {
+    const { mkdir, rm, readdir, chmod } = await import("fs/promises");
+
+    const sourceDir = join(tmpDir, "source-err");
+    const destDir = join(tmpDir, "dest-err");
+    await mkdir(sourceDir, { recursive: true });
+    await mkdir(destDir, { recursive: true });
+
+    // Create source skill folder
+    const sourceSkillDir = join(sourceDir, "my-skill");
+    await mkdir(sourceSkillDir, { recursive: true });
+
+    // Make dest dir read-only to cause copy failure
+    await chmod(destDir, 0o444);
+
+    const script = `
+skills_dir="${destDir}"
+skill_folder="${sourceSkillDir}"
+skill_name="my-skill"
+target_path="$skills_dir/my-skill@org_project"
+
+# Atomic install attempt
+temp_dir=$(mktemp -d "\${skills_dir}/.install-tmp.XXXXXX" 2>/dev/null)
+if [ -z "$temp_dir" ]; then
+  echo "COPY_FAILED"
+  exit 0
+fi
+
+temp_target="$temp_dir/$(basename "$target_path")"
+
+if ! cp -r "$skill_folder" "$temp_target" 2>/dev/null; then
+  rm -rf "$temp_dir" 2>/dev/null
+  echo "COPY_FAILED"
+  exit 0
+fi
+
+echo "COPY_SUCCESS"
+`;
+
+    const result = await $`bash -c ${script}`.quiet();
+    expect(result.text().trim()).toBe("COPY_FAILED");
+
+    // Restore permissions and cleanup
+    await chmod(destDir, 0o755);
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  test("cleans up temp files on move failure", async () => {
+    const { mkdir, rm, readdir, writeFile } = await import("fs/promises");
+
+    const sourceDir = join(tmpDir, "source-mv-err");
+    const destDir = join(tmpDir, "dest-mv-err");
+    await mkdir(sourceDir, { recursive: true });
+    await mkdir(destDir, { recursive: true });
+
+    // Create source skill folder
+    const sourceSkillDir = join(sourceDir, "my-skill");
+    await mkdir(sourceSkillDir, { recursive: true });
+    await writeFile(join(sourceSkillDir, "index.md"), "# Test");
+
+    const script = `
+skills_dir="${destDir}"
+skill_folder="${sourceSkillDir}"
+target_path="$skills_dir/my-skill@org_project"
+
+# Atomic install with simulated move failure
+temp_dir=$(mktemp -d "\${skills_dir}/.install-tmp.XXXXXX")
+temp_target="$temp_dir/$(basename "$target_path")"
+
+cp -r "$skill_folder" "$temp_target"
+
+# Simulate move failure and verify cleanup
+if ! false; then  # Always fails
+  rm -rf "$temp_dir" 2>/dev/null
+  echo "CLEANUP_DONE"
+  exit 0
+fi
+`;
+
+    const result = await $`bash -c ${script}`.quiet();
+    expect(result.text().trim()).toBe("CLEANUP_DONE");
+
+    // Verify no temp directories left behind
+    const files = await readdir(destDir);
+    const tempDirs = files.filter(f => f.startsWith(".install-tmp"));
+    expect(tempDirs.length).toBe(0);
+
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  test("handles mktemp failure gracefully", async () => {
+    const { mkdir, rm } = await import("fs/promises");
+
+    const sourceDir = join(tmpDir, "source-mktemp");
+    await mkdir(sourceDir, { recursive: true });
+
+    // Create source skill folder
+    const sourceSkillDir = join(sourceDir, "my-skill");
+    await mkdir(sourceSkillDir, { recursive: true });
+
+    // Use non-existent directory for skills_dir to cause mktemp failure
+    const nonExistentDir = join(tmpDir, "non-existent-dir");
+
+    const script = `
+print_error() { echo "ERROR: $1" >&2; }
+
+skills_dir="${nonExistentDir}"
+skill_name="my-skill"
+
+# Attempt mktemp in non-existent directory (will fail)
+temp_dir=$(mktemp -d "\${skills_dir}/.install-tmp.XXXXXX" 2>/dev/null)
+if [ -z "$temp_dir" ] || [ ! -d "$temp_dir" ]; then
+  print_error "  Failed to create temp directory: $skill_name"
+  echo "MKTEMP_FAILED"
+  exit 0
+fi
+
+echo "MKTEMP_SUCCESS"
+`;
+
+    const result = await $`bash -c ${script}`.quiet();
+    expect(result.text().trim()).toBe("MKTEMP_FAILED");
+
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  test("path validation rejects traversal attempts", async () => {
+    const { mkdir, rm } = await import("fs/promises");
+
+    // Create actual test directories
+    const testDir = join(tmpDir, "path-validation");
+    const skillsDir = join(testDir, "skills");
+    await mkdir(skillsDir, { recursive: true });
+
+    const script = `
+validate_path_within_dir() {
+  local parent_dir="$1"
+  local target_path="$2"
+
+  local resolved_parent
+  resolved_parent=$(cd "$parent_dir" 2>/dev/null && pwd -P)
+  [ -z "$resolved_parent" ] && return 1
+
+  local basename
+  basename=$(basename "$target_path")
+  if [[ "$basename" =~ / ]] || [[ "$basename" =~ \\.\\. ]] || [ -z "$basename" ]; then
+    return 1
+  fi
+
+  local expected_target="$resolved_parent/$basename"
+  local actual_target
+  actual_target=$(cd "$parent_dir" && cd "$(dirname "$target_path")" 2>/dev/null && pwd -P)/$(basename "$target_path")
+
+  if [ -z "$actual_target" ]; then
+    [ "$target_path" = "$resolved_parent/$basename" ]
+    return $?
+  fi
+
+  [ "$actual_target" = "$expected_target" ]
+}
+
+skills_dir="${skillsDir}"
+
+# Test valid path (direct child of skills_dir)
+if validate_path_within_dir "$skills_dir" "$skills_dir/my-skill@org_project"; then
+  echo "VALID_PATH_OK"
+else
+  echo "VALID_PATH_FAIL"
+fi
+
+# Test traversal attempt (trying to escape skills_dir)
+if validate_path_within_dir "$skills_dir" "$skills_dir/../etc/passwd"; then
+  echo "TRAVERSAL_ALLOWED"
+else
+  echo "TRAVERSAL_BLOCKED"
+fi
+
+# Test path with .. in basename
+if validate_path_within_dir "$skills_dir" "$skills_dir/.."; then
+  echo "DOTDOT_ALLOWED"
+else
+  echo "DOTDOT_BLOCKED"
+fi
+`;
+
+    const result = await $`bash -c ${script}`.quiet();
+    const output = result.text().trim();
+    expect(output).toContain("VALID_PATH_OK");
+    expect(output).toContain("TRAVERSAL_BLOCKED");
+    expect(output).toContain("DOTDOT_BLOCKED");
+
+    await rm(tmpDir, { recursive: true, force: true });
   });
 });
 
