@@ -1,0 +1,44 @@
+# Automatically regenerates projects.json.sha256 when projects.json changes.
+# This ensures the install script's checksum validation always passes.
+name: Update SHA256
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - projects.json
+
+concurrency:
+  group: update-sha256
+  cancel-in-progress: false
+
+jobs:
+  update-checksum:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Generate SHA256 checksum
+        run: shasum -a 256 projects.json > projects.json.sha256 || exit 1
+
+      - name: Check for changes
+        id: check
+        run: |
+          if git diff --quiet projects.json.sha256; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Commit and push
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add projects.json.sha256
+          git commit -m "Update projects.json.sha256 [skip ci]"
+          git push
