@@ -1,0 +1,39 @@
+name: Update SHA256
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - projects.json
+
+permissions:
+  contents: write
+
+jobs:
+  update-checksum:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate SHA256 checksum
+        run: shasum -a 256 projects.json > projects.json.sha256
+
+      - name: Check for changes
+        id: check
+        run: |
+          if git diff --quiet projects.json.sha256; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Commit and push
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add projects.json.sha256
+          git commit -m "Update projects.json.sha256"
+          git push
