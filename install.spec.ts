@@ -70,7 +70,7 @@ get_skills_dir() {
 
 parse_source() {
   local repo="$1"
-  echo "https://github.com/$repo.git" ".claude"
+  echo "https://github.com/$repo.git" ".plaited"
 }
 
 get_project_names() {
@@ -180,12 +180,12 @@ describe("install.sh - get_skills_dir", () => {
 });
 
 describe("install.sh - parse_source", () => {
-  test("parses repo and always uses .claude", async () => {
+  test("parses repo and always uses .plaited", async () => {
     const result = await callFunction(
       "parse_source",
       "plaited/typescript-lsp"
     );
-    expect(result).toBe("https://github.com/plaited/typescript-lsp.git .claude");
+    expect(result).toBe("https://github.com/plaited/typescript-lsp.git .plaited");
   });
 
   test("parses another repo format", async () => {
@@ -193,7 +193,7 @@ describe("install.sh - parse_source", () => {
       "parse_source",
       "plaited/acp-harness"
     );
-    expect(result).toBe("https://github.com/plaited/acp-harness.git .claude");
+    expect(result).toBe("https://github.com/plaited/acp-harness.git .plaited");
   });
 });
 
@@ -221,7 +221,7 @@ parse_source() {
     return 1
   fi
 
-  echo "https://github.com/$repo.git" ".claude"
+  echo "https://github.com/$repo.git" ".plaited"
 }
 
 parse_source "${repo}"
@@ -320,7 +320,7 @@ describe("install.sh - CLI", () => {
     const result = await $`bash ${INSTALL_SCRIPT} --help`.quiet();
     const output = result.text();
     expect(output).toContain("Usage:");
-    expect(output).toContain("--agent");
+    expect(output).toContain("--agents");
     expect(output).toContain("--project");
     expect(output).toContain("--list");
   });
@@ -358,12 +358,23 @@ describe("install.sh - CLI", () => {
 
   test("invalid agent shows error", async () => {
     try {
-      await $`bash ${INSTALL_SCRIPT} --agent invalid-agent`.quiet();
+      await $`bash ${INSTALL_SCRIPT} --agents invalid-agent`.quiet();
       expect(true).toBe(false); // Should not reach here
     } catch (error: unknown) {
       const err = error as { exitCode: number; stderr: { toString(): string } };
       expect(err.exitCode).toBe(1);
       expect(err.stderr.toString()).toContain("Unknown agent");
+    }
+  });
+
+  test("--agent is not a valid option (replaced by --agents)", async () => {
+    try {
+      await $`bash ${INSTALL_SCRIPT} --agent claude`.quiet();
+      expect(true).toBe(false); // Should not reach here
+    } catch (error: unknown) {
+      const err = error as { exitCode: number; stderr: { toString(): string } };
+      expect(err.exitCode).toBe(1);
+      expect(err.stderr.toString()).toContain("Unknown option: --agent");
     }
   });
 
@@ -629,6 +640,92 @@ fi
         "plaited/development-skills"
       );
       expect(result).toBe("typescript-lsp@plaited_development-skills");
+    });
+  });
+});
+
+describe("install.sh - symlink functions", () => {
+  // Helper to test get_relative_symlink_path
+  async function getRelativeSymlinkPath(agentSkillsDir: string, skillName: string): Promise<string> {
+    const script = `
+CENTRAL_SKILLS_DIR=".plaited/skills"
+
+get_relative_symlink_path() {
+  local agent_skills_dir="$1"
+  local skill_name="$2"
+
+  local depth
+  depth=$(echo "$agent_skills_dir" | tr '/' '\\n' | grep -c .)
+
+  local rel_path=""
+  local i
+  for ((i=0; i<depth; i++)); do
+    rel_path="../$rel_path"
+  done
+
+  echo "\${rel_path}\${CENTRAL_SKILLS_DIR}/\${skill_name}"
+}
+
+get_relative_symlink_path "${agentSkillsDir}" "${skillName}"
+`;
+    const result = await $`bash -c ${script}`.quiet();
+    return result.text().trim();
+  }
+
+  describe("get_relative_symlink_path", () => {
+    test("calculates correct path for .claude/skills", async () => {
+      const result = await getRelativeSymlinkPath(".claude/skills", "my-skill@org_proj");
+      expect(result).toBe("../../.plaited/skills/my-skill@org_proj");
+    });
+
+    test("calculates correct path for .gemini/skills", async () => {
+      const result = await getRelativeSymlinkPath(".gemini/skills", "my-skill@org_proj");
+      expect(result).toBe("../../.plaited/skills/my-skill@org_proj");
+    });
+
+    test("calculates correct path for .github/skills (copilot)", async () => {
+      const result = await getRelativeSymlinkPath(".github/skills", "my-skill@org_proj");
+      expect(result).toBe("../../.plaited/skills/my-skill@org_proj");
+    });
+
+    test("calculates correct path for .opencode/skill (singular)", async () => {
+      const result = await getRelativeSymlinkPath(".opencode/skill", "my-skill@org_proj");
+      expect(result).toBe("../../.plaited/skills/my-skill@org_proj");
+    });
+  });
+
+  describe("symlink creation integration", () => {
+    const tmpDir = join(import.meta.dir, ".test-tmp-symlink");
+
+    test("creates symlinks from agent dir to central storage", async () => {
+      const { mkdir, rm, readdir, readlink, writeFile } = await import("fs/promises");
+
+      // Setup
+      const centralDir = join(tmpDir, ".plaited/skills");
+      const agentDir = join(tmpDir, ".claude/skills");
+      await mkdir(centralDir, { recursive: true });
+      await mkdir(agentDir, { recursive: true });
+
+      // Create a skill in central storage
+      const skillDir = join(centralDir, "test-skill@org_project");
+      await mkdir(skillDir, { recursive: true });
+      await writeFile(join(skillDir, "skill.md"), "# Test Skill");
+
+      // Create symlink manually (simulating create_agent_symlinks behavior)
+      const symlinkPath = join(agentDir, "test-skill@org_project");
+      const relativePath = "../../.plaited/skills/test-skill@org_project";
+      await $`ln -s ${relativePath} ${symlinkPath}`.quiet();
+
+      // Verify symlink was created
+      const items = await readdir(agentDir);
+      expect(items).toContain("test-skill@org_project");
+
+      // Verify it's a symlink pointing to correct target
+      const target = await readlink(symlinkPath);
+      expect(target).toBe(relativePath);
+
+      // Cleanup
+      await rm(tmpDir, { recursive: true, force: true });
     });
   });
 });
@@ -1329,20 +1426,6 @@ done
 
 describe("install.sh - edge cases", () => {
   const tmpDir = join(import.meta.dir, ".test-tmp-edge");
-
-  describe("skills-dir override", () => {
-    test("--skills-dir accepts custom path", async () => {
-      const { mkdir, rm, readdir } = await import("fs/promises");
-      const customDir = join(tmpDir, "custom-skills");
-      await mkdir(customDir, { recursive: true });
-
-      // The help should mention --skills-dir
-      const helpResult = await $`bash ${INSTALL_SCRIPT} --help`.quiet();
-      expect(helpResult.text()).toContain("--skills-dir");
-
-      await rm(tmpDir, { recursive: true, force: true });
-    });
-  });
 
   describe("skill scoping edge cases", () => {
     async function testScopedName(skillName: string, repo: string): Promise<string> {
