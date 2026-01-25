@@ -394,6 +394,30 @@ describe("install.sh - CLI", () => {
     const output = result.text();
     expect(output).not.toContain("--update");
   });
+
+  test("headless mode without agents shows helpful error", async () => {
+    const { mkdir, rm } = await import("fs/promises");
+    const tmpDir = join(import.meta.dir, ".test-tmp-headless");
+    await mkdir(tmpDir, { recursive: true });
+
+    try {
+      // Run in clean temp directory with no agent directories
+      // Simulate headless mode by piping input (no TTY)
+      await $`cd ${tmpDir} && echo "" | bash ${INSTALL_SCRIPT}`.quiet();
+      expect(true).toBe(false); // Should not reach here
+    } catch (error: unknown) {
+      const err = error as { exitCode: number; stderr: { toString(): string }; stdout: { toString(): string } };
+      expect(err.exitCode).toBe(1);
+      const stderr = err.stderr.toString();
+      const stdout = err.stdout.toString();
+      // Error message goes to stderr
+      expect(stderr).toContain("No agents specified");
+      // Helpful hint goes to stdout via print_info
+      expect(stdout).toContain("--agents");
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("README.md consistency", () => {

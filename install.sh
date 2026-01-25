@@ -1504,9 +1504,22 @@ main() {
       do_list
       ;;
     install)
-      # If no agents specified, use interactive multi-select
+      # If no agents specified, use interactive or auto-detect
       if [ -z "$agents" ]; then
-        agents=$(ask_agents_multiselect)
+        if [ -t 0 ]; then
+          # Interactive mode: TTY available, use multi-select menu
+          agents=$(ask_agents_multiselect)
+        else
+          # Headless mode: no TTY, auto-detect agents from existing directories
+          agents=$(detect_agents)
+          if [ -z "$agents" ]; then
+            print_error "No agents specified and none detected"
+            print_info "In headless mode, use --agents to specify targets:"
+            print_info "  ./install.sh --agents claude,gemini"
+            exit 1
+          fi
+          print_info "Headless mode: auto-detected agents: $agents"
+        fi
       fi
 
       # Validate all agents
