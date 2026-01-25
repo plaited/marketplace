@@ -24,6 +24,10 @@ TEMP_PROJECTS_JSON=""  # Track if projects.json is a temp file that needs cleanu
 # Central skills storage directory (all skills stored here, symlinked to agent dirs)
 CENTRAL_SKILLS_DIR=".plaited/skills"
 
+# Lock file for concurrent installation safety
+LOCK_FILE=".plaited/.install.lock"
+LOCK_ACQUIRED=""
+
 # Security: Maximum file size for reading (100KB) to prevent resource exhaustion
 MAX_FILE_SIZE=102400
 
@@ -142,6 +146,43 @@ handle_existing_skill() {
   esac
 }
 
+# Validate symlink won't create circular reference
+# Returns 0 if safe, 1 if would create circular reference
+validate_symlink_not_circular() {
+  local symlink_path="$1"   # Where the symlink will be created
+  local target_path="$2"    # What the symlink will point to
+
+  # Get absolute paths for comparison
+  local symlink_dir
+  symlink_dir=$(cd "$(dirname "$symlink_path")" 2>/dev/null && pwd -P)
+  [ -z "$symlink_dir" ] && return 0  # Parent doesn't exist yet, safe to create
+
+  local symlink_abs="$symlink_dir/$(basename "$symlink_path")"
+
+  # Resolve the target relative to the symlink location
+  local target_abs
+  if [[ "$target_path" == /* ]]; then
+    target_abs="$target_path"
+  else
+    target_abs="$symlink_dir/$target_path"
+  fi
+
+  # Normalize path (remove ./ and resolve ../)
+  target_abs=$(cd "$(dirname "$target_abs")" 2>/dev/null && pwd -P)/$(basename "$target_abs")
+
+  # Check if symlink would point to itself
+  if [ "$symlink_abs" = "$target_abs" ]; then
+    return 1  # Would point to itself
+  fi
+
+  # Check if target is under the symlink path (would create loop)
+  if [[ "$target_abs" == "$symlink_abs"/* ]]; then
+    return 1  # Target is under symlink, would create loop
+  fi
+
+  return 0  # Safe
+}
+
 
 # ============================================================================
 # Helper Functions
@@ -167,7 +208,65 @@ print_error() {
   echo "✗ $1" >&2
 }
 
+# Acquire installation lock to prevent concurrent installations
+# Uses mkdir for atomic lock creation (works across all platforms)
+acquire_lock() {
+  local lock_dir
+  lock_dir=$(dirname "$LOCK_FILE")
+
+  # Create parent directory if needed
+  mkdir -p "$lock_dir" 2>/dev/null
+
+  # Try to create lock file atomically using mkdir
+  # mkdir is atomic and will fail if directory already exists
+  local lock_tmp="${LOCK_FILE}.$$"
+  if mkdir "$lock_tmp" 2>/dev/null; then
+    # Successfully created lock
+    echo "$$" > "$lock_tmp/pid"
+    mv "$lock_tmp" "$LOCK_FILE" 2>/dev/null || {
+      # Another process got the lock first
+      rmdir "$lock_tmp" 2>/dev/null
+      return 1
+    }
+    LOCK_ACQUIRED="1"
+    return 0
+  fi
+
+  # Lock exists - check if it's stale (process no longer running)
+  if [ -f "$LOCK_FILE/pid" ]; then
+    local lock_pid
+    lock_pid=$(cat "$LOCK_FILE/pid" 2>/dev/null)
+    if [ -n "$lock_pid" ] && ! kill -0 "$lock_pid" 2>/dev/null; then
+      # Process is dead, remove stale lock
+      rm -rf "$LOCK_FILE" 2>/dev/null
+      # Try again
+      if mkdir "$lock_tmp" 2>/dev/null; then
+        echo "$$" > "$lock_tmp/pid"
+        mv "$lock_tmp" "$LOCK_FILE" 2>/dev/null || {
+          rmdir "$lock_tmp" 2>/dev/null
+          return 1
+        }
+        LOCK_ACQUIRED="1"
+        return 0
+      fi
+    fi
+  fi
+
+  return 1  # Could not acquire lock
+}
+
+# Release installation lock
+release_lock() {
+  if [ -n "$LOCK_ACQUIRED" ] && [ -d "$LOCK_FILE" ]; then
+    rm -rf "$LOCK_FILE" 2>/dev/null
+    LOCK_ACQUIRED=""
+  fi
+}
+
 cleanup() {
+  # Release lock if we hold it
+  release_lock
+
   if [ -n "$TEMP_DIR" ] && [ -d "$TEMP_DIR" ]; then
     rm -rf "$TEMP_DIR"
   fi
@@ -899,6 +998,20 @@ create_agent_symlinks() {
         esac
       fi
 
+      # Verify target exists in central storage before creating symlink
+      if [ ! -d "$CENTRAL_SKILLS_DIR/$skill_name" ]; then
+        print_error "    Target does not exist: $skill_name"
+        failed_count=$((failed_count + 1))
+        continue
+      fi
+
+      # Validate symlink won't create circular reference
+      if ! validate_symlink_not_circular "$symlink_path" "$relative_target"; then
+        print_error "    Circular symlink detected: $skill_name"
+        failed_count=$((failed_count + 1))
+        continue
+      fi
+
       # Create symlink
       local ln_error
       if ln_error=$(ln -s "$relative_target" "$symlink_path" 2>&1); then
@@ -1214,6 +1327,13 @@ do_install() {
   local agents="$1"           # Space-separated list of agents
   local specific_project="$2"
 
+  # Acquire lock to prevent concurrent installations
+  if ! acquire_lock; then
+    print_error "Another installation is in progress"
+    print_info "If this is an error, remove $LOCK_FILE manually"
+    return 1
+  fi
+
   print_info "Central storage: $CENTRAL_SKILLS_DIR/"
   print_info "Target agents: $agents"
   echo ""
@@ -1363,6 +1483,13 @@ do_list() {
 do_uninstall() {
   local agents="$1"           # Space-separated list of agents (optional)
   local specific_project="$2"
+
+  # Acquire lock to prevent concurrent operations
+  if ! acquire_lock; then
+    print_error "Another installation/uninstallation is in progress"
+    print_info "If this is an error, remove $LOCK_FILE manually"
+    return 1
+  fi
 
   # If no agents specified, uninstall from all agents that have symlinks
   if [ -z "$agents" ]; then

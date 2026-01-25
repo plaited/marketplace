@@ -5,6 +5,15 @@
 
 Install Plaited skills for AI coding agents supporting the agent-skills-spec.
 
+## Requirements
+
+- **macOS / Linux**: Works out of the box
+- **Windows**: Requires one of:
+  - WSL (Windows Subsystem for Linux) - recommended
+  - Developer Mode enabled (for symlink support)
+
+The installer uses symlinks to avoid duplicating skill files across multiple agents. Windows requires special permissions or WSL for symlink creation.
+
 ## Installation
 
 For agents supporting the agent-skills-spec (Gemini CLI, GitHub Copilot, Cursor, OpenCode, Amp, Goose, Factory, Codex, Windsurf, Claude Code):
@@ -49,6 +58,8 @@ This approach:
 - Ensures all agents use identical skill versions
 - Makes updates simpler (update once, all agents see changes)
 
+**Note:** Modifying files through symlinks affects all agents sharing that skill.
+
 **Supported agents:**
 
 | Agent | Skills Directory |
@@ -83,17 +94,6 @@ Example: `typescript-lsp` from `plaited/development-skills` becomes `typescript-
 **Inherited skills** (already scoped from another project) preserve their original scope to prevent double-scoping.
 
 **Note:** Org and project names may contain alphanumeric characters, dots, hyphens, and underscores. Some tools using dot-notation for namespacing may interpret dots specially.
-
-### Upgrading from Previous Versions
-
-**Breaking change:** Skills are now stored in `.plaited/skills/` (previously copied directly to agent directories).
-
-To upgrade from a previous installation:
-
-```bash
-./install.sh --uninstall
-./install.sh --agents claude,gemini  # or your preferred agents
-```
 
 ### Replace-on-Install Behavior
 
