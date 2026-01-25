@@ -670,6 +670,7 @@ fi
 
 describe("install.sh - symlink functions", () => {
   // Helper to test get_relative_symlink_path
+  // Uses same awk logic as production code for consistency
   async function getRelativeSymlinkPath(agentSkillsDir: string, skillName: string): Promise<string> {
     const script = `
 CENTRAL_SKILLS_DIR=".plaited/skills"
@@ -678,8 +679,10 @@ get_relative_symlink_path() {
   local agent_skills_dir="$1"
   local skill_name="$2"
 
+  # Use awk to handle edge cases (trailing slashes, empty components)
+  # Same logic as production install.sh
   local depth
-  depth=$(echo "$agent_skills_dir" | tr '/' '\\n' | grep -c .)
+  depth=$(echo "$agent_skills_dir" | awk -F'/' '{n=0; for(i=1;i<=NF;i++) if($i!="") n++; print n}')
 
   local rel_path=""
   local i

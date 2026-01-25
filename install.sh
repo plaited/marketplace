@@ -220,16 +220,24 @@ acquire_lock() {
   # Try to create lock file atomically using mkdir
   # mkdir is atomic and will fail if directory already exists
   local lock_tmp="${LOCK_FILE}.$$"
+
+  # Helper to clean up temp lock directory
+  cleanup_tmp_lock() {
+    rm -rf "$lock_tmp" 2>/dev/null
+  }
+
   if mkdir "$lock_tmp" 2>/dev/null; then
-    # Successfully created lock
+    # Successfully created temp lock dir, write pid
     echo "$$" > "$lock_tmp/pid"
-    mv "$lock_tmp" "$LOCK_FILE" 2>/dev/null || {
-      # Another process got the lock first
-      rmdir "$lock_tmp" 2>/dev/null
+    # Try atomic rename to actual lock location
+    if mv "$lock_tmp" "$LOCK_FILE" 2>/dev/null; then
+      LOCK_ACQUIRED="1"
+      return 0
+    else
+      # Another process got the lock first, clean up our temp dir
+      cleanup_tmp_lock
       return 1
-    }
-    LOCK_ACQUIRED="1"
-    return 0
+    fi
   fi
 
   # Lock exists - check if it's stale (process no longer running)
@@ -239,15 +247,16 @@ acquire_lock() {
     if [ -n "$lock_pid" ] && ! kill -0 "$lock_pid" 2>/dev/null; then
       # Process is dead, remove stale lock
       rm -rf "$LOCK_FILE" 2>/dev/null
-      # Try again
+      # Try again with fresh temp lock
       if mkdir "$lock_tmp" 2>/dev/null; then
         echo "$$" > "$lock_tmp/pid"
-        mv "$lock_tmp" "$LOCK_FILE" 2>/dev/null || {
-          rmdir "$lock_tmp" 2>/dev/null
+        if mv "$lock_tmp" "$LOCK_FILE" 2>/dev/null; then
+          LOCK_ACQUIRED="1"
+          return 0
+        else
+          cleanup_tmp_lock
           return 1
-        }
-        LOCK_ACQUIRED="1"
-        return 0
+        fi
       fi
     fi
   fi
@@ -1065,10 +1074,12 @@ remove_agent_symlinks() {
       fi
 
       # Check if symlink points to our central storage
-      # Use exact pattern matching to avoid false positives
+      # Use strict pattern matching to only match our relative symlinks
+      # Our symlinks are always relative paths like ../../.plaited/skills/skill-name
       local target
       target=$(readlink "$symlink" 2>/dev/null)
-      if [[ "$target" == *".plaited/skills/"* ]]; then
+      # Match: starts with ../ and contains .plaited/skills/, OR starts with .plaited/skills/
+      if [[ "$target" == "../"*".plaited/skills/"* ]] || [[ "$target" == ".plaited/skills/"* ]]; then
         rm -f "$symlink"
         print_info "  Removed symlink: $skill_name (from $agent)"
         removed=$((removed + 1))
