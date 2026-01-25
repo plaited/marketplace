@@ -92,8 +92,9 @@ get_relative_symlink_path() {
   local skill_name="$2"        # e.g., typescript-lsp@plaited_development-skills
 
   # Count depth of agent skills dir (number of path components)
+  # Use awk to handle edge cases (trailing slashes, empty components)
   local depth
-  depth=$(echo "$agent_skills_dir" | tr '/' '\n' | grep -c .)
+  depth=$(echo "$agent_skills_dir" | awk -F'/' '{n=0; for(i=1;i<=NF;i++) if($i!="") n++; print n}')
 
   # Build relative path back to root
   local rel_path=""
@@ -668,7 +669,9 @@ ask_agents_multiselect() {
   render_menu() {
     # Move cursor up to redraw (if not first render)
     if [ "$1" = "redraw" ]; then
-      # Move up num_agents + 4 lines (header + agents + footer)
+      # Move cursor up to overwrite previous menu render
+      # Lines: 1 (title) + 1 (empty) + 3 (table header) + num_agents + 1 (table footer) = num_agents + 6
+      # But we start printing from title, so move up num_agents + 5 lines
       printf "\033[%dA" $((num_agents + 5))
     fi
 
@@ -887,10 +890,12 @@ create_agent_symlinks() {
       fi
 
       # Create symlink
-      if ln -s "$relative_target" "$symlink_path" 2>/dev/null; then
+      local ln_error
+      if ln_error=$(ln -s "$relative_target" "$symlink_path" 2>&1); then
         print_info "    Linked: $skill_name"
       else
         print_error "    Failed to link: $skill_name"
+        print_error "      $ln_error"
       fi
     done
   done

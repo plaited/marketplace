@@ -751,6 +751,67 @@ get_relative_symlink_path "${agentSkillsDir}" "${skillName}"
       // Cleanup
       await rm(tmpDir, { recursive: true, force: true });
     });
+
+    test("creates symlinks for multiple agents from single central storage", async () => {
+      const { mkdir, rm, readdir, readlink, writeFile, stat } = await import("fs/promises");
+
+      // Setup central storage
+      const centralDir = join(tmpDir, ".plaited/skills");
+      await mkdir(centralDir, { recursive: true });
+
+      // Create skills in central storage
+      const skills = ["skill-a@org_project", "skill-b@org_project"];
+      for (const skill of skills) {
+        const skillDir = join(centralDir, skill);
+        await mkdir(skillDir, { recursive: true });
+        await writeFile(join(skillDir, "skill.md"), `# ${skill}`);
+      }
+
+      // Setup multiple agent directories
+      const agents = [
+        { name: "claude", dir: ".claude/skills" },
+        { name: "gemini", dir: ".gemini/skills" },
+        { name: "cursor", dir: ".cursor/skills" },
+      ];
+
+      for (const agent of agents) {
+        const agentDir = join(tmpDir, agent.dir);
+        await mkdir(agentDir, { recursive: true });
+
+        // Create symlinks for each skill
+        for (const skill of skills) {
+          const symlinkPath = join(agentDir, skill);
+          const relativePath = `../../.plaited/skills/${skill}`;
+          await $`ln -s ${relativePath} ${symlinkPath}`.quiet();
+        }
+      }
+
+      // Verify all agents have symlinks to the same central skills
+      for (const agent of agents) {
+        const agentDir = join(tmpDir, agent.dir);
+        const items = await readdir(agentDir);
+
+        expect(items.sort()).toEqual(skills.sort());
+
+        // Verify each is a symlink pointing to central storage
+        for (const skill of skills) {
+          const symlinkPath = join(agentDir, skill);
+          const target = await readlink(symlinkPath);
+          expect(target).toBe(`../../.plaited/skills/${skill}`);
+
+          // Verify symlink resolves to actual content
+          const resolvedStat = await stat(symlinkPath);
+          expect(resolvedStat.isDirectory()).toBe(true);
+        }
+      }
+
+      // Verify central storage has only one copy
+      const centralItems = await readdir(centralDir);
+      expect(centralItems.sort()).toEqual(skills.sort());
+
+      // Cleanup
+      await rm(tmpDir, { recursive: true, force: true });
+    });
   });
 });
 
