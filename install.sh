@@ -575,7 +575,8 @@ remove_project_scoped_content() {
 detect_agents() {
   # Agent detection: directory -> agent name mapping
   # Returns space-separated list of detected agents
-  local agents=".gemini:gemini .github:copilot .cursor:cursor .opencode:opencode .amp:amp .goose:goose .factory:factory .codex:codex .windsurf:windsurf .claude:claude"
+  # Note: copilot requires .github/skills to avoid false positives from GitHub Actions
+  local agents=".gemini:gemini .cursor:cursor .opencode:opencode .amp:amp .goose:goose .factory:factory .codex:codex .windsurf:windsurf .claude:claude"
   local detected=""
 
   for entry in $agents; do
@@ -586,7 +587,17 @@ detect_agents() {
     fi
   done
 
+  # Special case: copilot needs .github/skills (not just .github which is common for GitHub Actions)
+  if [ -d ".github/skills" ]; then
+    detected="$detected copilot"
+  fi
+
   echo "$detected" | xargs  # Trim whitespace
+}
+
+# Check if .github exists but without skills (potential copilot user)
+has_github_without_skills() {
+  [ -d ".github" ] && [ ! -d ".github/skills" ]
 }
 
 # All supported agents in order
@@ -615,12 +626,25 @@ ask_agents_multiselect() {
   local detected
   detected=$(detect_agents)
 
+  # If .github exists but no skills/, ask user about copilot
+  local suggest_copilot=""
+  if has_github_without_skills && [ -z "$detected" ]; then
+    echo ""
+    echo "  Found .github/ directory but no .github/skills/"
+    printf "  Are you using GitHub Copilot? [y/N]: "
+    read -r answer
+    if [[ "$answer" =~ ^[Yy] ]]; then
+      suggest_copilot="copilot"
+    fi
+    echo ""
+  fi
+
   # Initialize selection array (1=selected, 0=not selected)
-  # Pre-select detected agents
+  # Pre-select detected agents (and copilot if user confirmed)
   local -a selected=()
   local i=0
   for agent in $ALL_AGENTS; do
-    if [[ " $detected " =~ " $agent " ]]; then
+    if [[ " $detected $suggest_copilot " =~ " $agent " ]]; then
       selected[$i]=1
     else
       selected[$i]=0
@@ -1513,7 +1537,14 @@ main() {
           # Headless mode: no TTY, auto-detect agents from existing directories
           agents=$(detect_agents)
           if [ -z "$agents" ]; then
-            print_error "No agents specified and none detected"
+            # Check if .github exists without skills - might be a copilot user
+            if has_github_without_skills; then
+              print_error "No agents detected (.github exists but has no skills/ directory)"
+              print_info "If using GitHub Copilot, specify it explicitly:"
+              print_info "  ./install.sh --agents copilot"
+            else
+              print_error "No agents specified and none detected"
+            fi
             print_info "In headless mode, use --agents to specify targets:"
             print_info "  ./install.sh --agents claude,gemini"
             exit 1
