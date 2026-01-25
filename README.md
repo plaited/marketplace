@@ -10,11 +10,11 @@ Install Plaited skills for AI coding agents supporting the agent-skills-spec.
 For agents supporting the agent-skills-spec (Gemini CLI, GitHub Copilot, Cursor, OpenCode, Amp, Goose, Factory, Codex, Windsurf, Claude Code):
 
 ```bash
-# Install all projects
-curl -fsSL https://raw.githubusercontent.com/plaited/skills-installer/main/install.sh | bash -s -- --agent <agent-name>
+# Install for multiple agents
+curl -fsSL https://raw.githubusercontent.com/plaited/skills-installer/main/install.sh | bash -s -- --agents claude,gemini
 
 # Install a specific project
-curl -fsSL https://raw.githubusercontent.com/plaited/skills-installer/main/install.sh | bash -s -- --agent <agent-name> --project development-skills
+curl -fsSL https://raw.githubusercontent.com/plaited/skills-installer/main/install.sh | bash -s -- --agents claude --project development-skills
 ```
 
 **Or clone and run locally:**
@@ -22,12 +22,32 @@ curl -fsSL https://raw.githubusercontent.com/plaited/skills-installer/main/insta
 ```bash
 git clone https://github.com/plaited/skills-installer.git
 cd skills-installer
-./install.sh                              # Interactive mode
-./install.sh --agent gemini               # Install all for Gemini CLI
-./install.sh --agent cursor --project agent-eval-harness  # Specific project
+./install.sh                              # Interactive mode (multi-select agents)
+./install.sh --agents claude,gemini       # Install for multiple agents
+./install.sh --agents cursor --project agent-eval-harness  # Specific project
 ./install.sh --list                       # List available projects
 ./install.sh --uninstall                  # Remove all
 ```
+
+## Architecture
+
+Skills are installed to a central `.plaited/skills/` directory and symlinked to each agent's skills directory:
+
+```
+.plaited/skills/                          # Central storage (single copy)
+  skill-name@org_project/
+
+.claude/skills/                           # Symlinks
+  skill-name@org_project -> ../../.plaited/skills/skill-name@org_project
+
+.gemini/skills/                           # Symlinks
+  skill-name@org_project -> ../../.plaited/skills/skill-name@org_project
+```
+
+This approach:
+- Saves disk space when supporting multiple agents
+- Ensures all agents use identical skill versions
+- Makes updates simpler (update once, all agents see changes)
 
 **Supported agents:**
 
@@ -64,16 +84,16 @@ Example: `typescript-lsp` from `plaited/development-skills` becomes `typescript-
 
 **Note:** Org and project names may contain alphanumeric characters, dots, hyphens, and underscores. Some tools using dot-notation for namespacing may interpret dots specially.
 
-### Upgrading from Unscoped Installations
+### Upgrading from Previous Versions
 
-If you previously installed skills without scoping, run `--uninstall` first to remove unscoped skills, then reinstall:
+**Breaking change:** Skills are now stored in `.plaited/skills/` (previously copied directly to agent directories).
+
+To upgrade from a previous installation:
 
 ```bash
-./install.sh --uninstall --agent <agent-name>
-./install.sh --agent <agent-name>
+./install.sh --uninstall
+./install.sh --agents claude,gemini  # or your preferred agents
 ```
-
-This ensures a clean installation with properly scoped skill names.
 
 ### Replace-on-Install Behavior
 

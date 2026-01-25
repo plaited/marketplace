@@ -117,7 +117,15 @@ handle_existing_skill() {
     return 0
   fi
 
-  # It's a real directory - ask user
+  # It's a real directory - need user decision
+  # In headless mode, default to skip to avoid hanging
+  if [ ! -t 0 ]; then
+    echo "  Conflict: $skill_name exists as directory, skipping (headless mode)" >&2
+    echo "skip"
+    return 0
+  fi
+
+  # Interactive mode - ask user
   echo "" >&2
   echo "  Conflict: $skill_name already exists as a directory (not a symlink)" >&2
   echo "  Path: $skill_path" >&2
