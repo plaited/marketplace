@@ -22,7 +22,29 @@ TEMP_DIR=""
 TEMP_PROJECTS_JSON=""  # Track if projects.json is a temp file that needs cleanup
 
 # Central skills storage directory (all skills stored here, symlinked to agent dirs)
+# Note: This path is validated at runtime to prevent path traversal attacks
 CENTRAL_SKILLS_DIR=".plaited/skills"
+
+# Validate CENTRAL_SKILLS_DIR doesn't contain special characters that could cause issues
+# This prevents edge cases with glob expansion and ensures safe path handling
+validate_central_dir() {
+  local dir="$1"
+  # Reject paths with spaces, special chars, or path traversal
+  if [[ "$dir" =~ [[:space:]] ]] || [[ "$dir" =~ \.\. ]] || [[ "$dir" =~ [\$\`\|\&\;\<\>\'\"] ]]; then
+    return 1
+  fi
+  # Only allow alphanumeric, dots, hyphens, underscores, forward slashes
+  if [[ "$dir" =~ [^a-zA-Z0-9._/-] ]]; then
+    return 1
+  fi
+  return 0
+}
+
+# Validate at script load time
+if ! validate_central_dir "$CENTRAL_SKILLS_DIR"; then
+  echo "Error: CENTRAL_SKILLS_DIR contains invalid characters" >&2
+  exit 1
+fi
 
 # Lock file for concurrent installation safety
 LOCK_FILE=".plaited/.install.lock"
@@ -168,7 +190,16 @@ validate_symlink_not_circular() {
   fi
 
   # Normalize path (remove ./ and resolve ../)
-  target_abs=$(cd "$(dirname "$target_abs")" 2>/dev/null && pwd -P)/$(basename "$target_abs")
+  local target_dir_resolved
+  target_dir_resolved=$(cd "$(dirname "$target_abs")" 2>/dev/null && pwd -P)
+
+  # If directory resolution failed (doesn't exist), assume safe to create
+  # The target directory not existing is fine - it will be created
+  if [ -z "$target_dir_resolved" ]; then
+    return 0  # Can't determine circular, assume safe
+  fi
+
+  target_abs="$target_dir_resolved/$(basename "$target_abs")"
 
   # Check if symlink would point to itself
   if [ "$symlink_abs" = "$target_abs" ]; then
@@ -247,17 +278,25 @@ acquire_lock() {
     if [ -n "$lock_pid" ] && ! kill -0 "$lock_pid" 2>/dev/null; then
       # Process is dead, remove stale lock
       rm -rf "$LOCK_FILE" 2>/dev/null
-      # Try again with fresh temp lock
-      if mkdir "$lock_tmp" 2>/dev/null; then
-        echo "$$" > "$lock_tmp/pid"
-        if mv "$lock_tmp" "$LOCK_FILE" 2>/dev/null; then
-          LOCK_ACQUIRED="1"
-          return 0
+
+      # Retry with backoff - another process might race us
+      local retry
+      for retry in 1 2 3; do
+        if mkdir "$lock_tmp" 2>/dev/null; then
+          echo "$$" > "$lock_tmp/pid"
+          if mv "$lock_tmp" "$LOCK_FILE" 2>/dev/null; then
+            LOCK_ACQUIRED="1"
+            return 0
+          else
+            cleanup_tmp_lock
+            # Another process won the race, sleep briefly and retry
+            sleep "0.$retry"
+          fi
         else
-          cleanup_tmp_lock
-          return 1
+          # Lock dir exists now (another process created it), give up
+          break
         fi
-      fi
+      done
     fi
   fi
 
@@ -781,8 +820,17 @@ ask_agents_multiselect() {
     # Move cursor up to redraw (if not first render)
     if [ "$1" = "redraw" ]; then
       # Move cursor up to overwrite previous menu render
-      # Lines: 1 (title) + 1 (empty) + 3 (table header) + num_agents + 1 (table footer) = num_agents + 6
-      # But we start printing from title, so move up num_agents + 5 lines
+      # Total lines rendered:
+      #   1 (title "Select target agents...")
+      #   1 (empty line)
+      #   3 (table header: top border, header row, separator)
+      #   num_agents (one row per agent)
+      #   1 (table footer: bottom border)
+      # = num_agents + 6 lines total
+      #
+      # We move up (num_agents + 5) because the cursor is already on the line
+      # after the last printed line, so we need to go back 5 lines + num_agents
+      # to reach the title line where we start printing.
       printf "\033[%dA" $((num_agents + 5))
     fi
 
@@ -1026,8 +1074,9 @@ create_agent_symlinks() {
       if ln_error=$(ln -s "$relative_target" "$symlink_path" 2>&1); then
         print_info "    Linked: $skill_name"
       else
-        print_error "    Failed to link: $skill_name"
-        print_error "      $ln_error"
+        print_error "    Failed to link: $skill_name -> $relative_target"
+        print_error "      Path: $symlink_path"
+        print_error "      Error: $ln_error"
         failed_count=$((failed_count + 1))
       fi
     done
@@ -1067,7 +1116,9 @@ remove_agent_symlinks() {
         if [ -n "$repo" ]; then
           local scope
           scope=$(get_skill_scope_prefix "$repo")
-          if [ -n "$scope" ] && [[ ! "$skill_name" =~ @${scope}$ ]]; then
+          # Use glob pattern matching (==) for consistency with security patterns
+          # Pattern *@${scope} matches skill names ending with @org_project
+          if [ -n "$scope" ] && [[ ! "$skill_name" == *"@${scope}" ]]; then
             continue  # Skip - doesn't match project scope
           fi
         fi
@@ -1080,9 +1131,21 @@ remove_agent_symlinks() {
       target=$(readlink "$symlink" 2>/dev/null)
       # Match: starts with ../ and contains .plaited/skills/, OR starts with .plaited/skills/
       if [[ "$target" == "../"*".plaited/skills/"* ]] || [[ "$target" == ".plaited/skills/"* ]]; then
-        rm -f "$symlink"
-        print_info "  Removed symlink: $skill_name (from $agent)"
-        removed=$((removed + 1))
+        # Additional security: verify the resolved path is actually within central storage
+        # This prevents removing symlinks that just happen to match the pattern string
+        # but point elsewhere (e.g., a crafted symlink)
+        local resolved_target
+        resolved_target=$(cd "$(dirname "$symlink")" 2>/dev/null && cd "$(dirname "$target")" 2>/dev/null && pwd -P)
+        if [ -n "$resolved_target" ]; then
+          local central_abs
+          central_abs=$(cd "$CENTRAL_SKILLS_DIR" 2>/dev/null && pwd -P)
+          # Only remove if resolved path is within central storage
+          if [ -n "$central_abs" ] && [[ "$resolved_target" == "$central_abs"* ]]; then
+            rm -f "$symlink"
+            print_info "  Removed symlink: $skill_name (from $agent)"
+            removed=$((removed + 1))
+          fi
+        fi
       fi
     done
   done
