@@ -119,7 +119,8 @@ handle_existing_skill() {
   fi
 
   # It's a real directory - need user decision
-  # In headless mode, default to skip to avoid hanging
+  # In headless mode (no TTY on stdin), default to skip to avoid hanging
+  # [ -t 0 ] returns true if file descriptor 0 (stdin) is a terminal
   if [ ! -t 0 ]; then
     echo "  Conflict: $skill_name exists as directory, skipping (headless mode)" >&2
     echo "skip"
@@ -663,7 +664,9 @@ ask_agents_multiselect() {
 
   # Current cursor position
   local cursor=0
-  local num_agents=10
+  # Calculate number of agents dynamically from ALL_AGENTS
+  local num_agents
+  num_agents=$(echo "$ALL_AGENTS" | wc -w | tr -d ' ')
 
   # Function to render the menu
   render_menu() {
@@ -824,12 +827,14 @@ create_agent_symlinks() {
   local agents="$1"
 
   if [ -z "$agents" ]; then
+    echo "0"  # Return failure count
     return 0
   fi
 
   # Check if central skills directory exists and has skills
   if [ ! -d "$CENTRAL_SKILLS_DIR" ]; then
     print_info "No skills in central directory to symlink"
+    echo "0"
     return 0
   fi
 
@@ -840,10 +845,14 @@ create_agent_symlinks() {
 
   if [ "$skills_count" -eq 0 ]; then
     print_info "No skills in central directory to symlink"
+    echo "0"
     return 0
   fi
 
   print_info "Creating symlinks for $skills_count skill(s)..."
+
+  # Track symlink failures
+  local failed_count=0
 
   for agent in $agents; do
     local agent_skills_dir
@@ -884,6 +893,7 @@ create_agent_symlinks() {
             ;;
           abort)
             print_error "Installation aborted by user"
+            echo "$failed_count"
             return 1
             ;;
         esac
@@ -896,10 +906,12 @@ create_agent_symlinks() {
       else
         print_error "    Failed to link: $skill_name"
         print_error "      $ln_error"
+        failed_count=$((failed_count + 1))
       fi
     done
   done
 
+  echo "$failed_count"
   return 0
 }
 
@@ -940,9 +952,10 @@ remove_agent_symlinks() {
       fi
 
       # Check if symlink points to our central storage
+      # Use exact pattern matching to avoid false positives
       local target
       target=$(readlink "$symlink" 2>/dev/null)
-      if [[ "$target" =~ \.plaited/skills/ ]]; then
+      if [[ "$target" == *".plaited/skills/"* ]]; then
         rm -f "$symlink"
         print_info "  Removed symlink: $skill_name (from $agent)"
         removed=$((removed + 1))
@@ -1265,9 +1278,12 @@ do_install() {
   print_info "Phase 2: Creating symlinks to agent directories..."
   echo ""
 
-  if ! create_agent_symlinks "$agents"; then
-    print_error "Failed to create some symlinks"
-    # Continue anyway - central storage is intact
+  local symlink_failures=0
+  symlink_failures=$(create_agent_symlinks "$agents")
+  local symlink_exit=$?
+
+  if [ "$symlink_exit" -ne 0 ]; then
+    print_error "Symlink creation was aborted"
   fi
 
   # Count skills in central directory
@@ -1293,6 +1309,13 @@ do_install() {
     agent_display=$(get_agent_display_name "$agent")
     echo "    - $agent_display: $agent_skills_dir/"
   done
+
+  # Report any failed symlinks
+  if [ "$symlink_failures" -gt 0 ]; then
+    echo ""
+    echo "  Warning: $symlink_failures symlink(s) failed to create"
+    echo "  Check permissions and try again, or create symlinks manually."
+  fi
 
   # Report any failed dependencies
   if [ -n "$FAILED_PROJECTS" ]; then
@@ -1542,12 +1565,13 @@ main() {
       ;;
     install)
       # If no agents specified, use interactive or auto-detect
+      # [ -t 0 ] checks if stdin (fd 0) is connected to a terminal (TTY)
       if [ -z "$agents" ]; then
         if [ -t 0 ]; then
-          # Interactive mode: TTY available, use multi-select menu
+          # Interactive mode: TTY available on stdin, use multi-select menu
           agents=$(ask_agents_multiselect)
         else
-          # Headless mode: no TTY, auto-detect agents from existing directories
+          # Headless mode: no TTY on stdin (piped/CI), auto-detect agents
           agents=$(detect_agents)
           if [ -z "$agents" ]; then
             # Check if .github exists without skills - might be a copilot user
