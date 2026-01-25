@@ -21,6 +21,35 @@ BRANCH="main"
 TEMP_DIR=""
 TEMP_PROJECTS_JSON=""  # Track if projects.json is a temp file that needs cleanup
 
+# Central skills storage directory (all skills stored here, symlinked to agent dirs)
+# Note: This path is validated at runtime to prevent path traversal attacks
+CENTRAL_SKILLS_DIR=".plaited/skills"
+
+# Validate CENTRAL_SKILLS_DIR doesn't contain special characters that could cause issues
+# This prevents edge cases with glob expansion and ensures safe path handling
+validate_central_dir() {
+  local dir="$1"
+  # Reject paths with spaces, special chars, or path traversal
+  if [[ "$dir" =~ [[:space:]] ]] || [[ "$dir" =~ \.\. ]] || [[ "$dir" =~ [\$\`\|\&\;\<\>\'\"] ]]; then
+    return 1
+  fi
+  # Only allow alphanumeric, dots, hyphens, underscores, forward slashes
+  if [[ "$dir" =~ [^a-zA-Z0-9._/-] ]]; then
+    return 1
+  fi
+  return 0
+}
+
+# Validate at script load time
+if ! validate_central_dir "$CENTRAL_SKILLS_DIR"; then
+  echo "Error: CENTRAL_SKILLS_DIR contains invalid characters" >&2
+  exit 1
+fi
+
+# Lock file for concurrent installation safety
+LOCK_FILE=".plaited/.install.lock"
+LOCK_ACQUIRED=""
+
 # Security: Maximum file size for reading (100KB) to prevent resource exhaustion
 MAX_FILE_SIZE=102400
 
@@ -82,6 +111,109 @@ get_skills_dir() {
   esac
 }
 
+# Calculate relative symlink path from agent skills dir to central skills dir
+# Example: from .claude/skills/skill -> ../../.plaited/skills/skill
+get_relative_symlink_path() {
+  local agent_skills_dir="$1"  # e.g., .claude/skills
+  local skill_name="$2"        # e.g., typescript-lsp@plaited_development-skills
+
+  # Count depth of agent skills dir (number of path components)
+  # Use awk to handle edge cases (trailing slashes, empty components)
+  local depth
+  depth=$(echo "$agent_skills_dir" | awk -F'/' '{n=0; for(i=1;i<=NF;i++) if($i!="") n++; print n}')
+
+  # Build relative path back to root
+  local rel_path=""
+  local i
+  for ((i=0; i<depth; i++)); do
+    rel_path="../$rel_path"
+  done
+
+  echo "${rel_path}${CENTRAL_SKILLS_DIR}/${skill_name}"
+}
+
+# Handle existing skill in agent directory (conflict resolution)
+# Returns: "replace", "skip", or "abort"
+handle_existing_skill() {
+  local skill_path="$1"
+  local skill_name="$2"
+
+  # If it's already a symlink, we can safely replace
+  if [ -L "$skill_path" ]; then
+    echo "replace"
+    return 0
+  fi
+
+  # It's a real directory - need user decision
+  # In headless mode (no TTY on stdin), default to skip to avoid hanging
+  # [ -t 0 ] returns true if file descriptor 0 (stdin) is a terminal
+  if [ ! -t 0 ]; then
+    echo "  Conflict: $skill_name exists as directory, skipping (headless mode)" >&2
+    echo "skip"
+    return 0
+  fi
+
+  # Interactive mode - ask user
+  echo "" >&2
+  echo "  Conflict: $skill_name already exists as a directory (not a symlink)" >&2
+  echo "  Path: $skill_path" >&2
+  echo "" >&2
+  printf "  [r]eplace with symlink / [s]kip / [a]bort? " >&2
+  read -r choice
+  case "$choice" in
+    r|R) echo "replace" ;;
+    s|S) echo "skip" ;;
+    a|A) echo "abort" ;;
+    *)   echo "skip" ;;  # Default to skip for safety
+  esac
+}
+
+# Validate symlink won't create circular reference
+# Returns 0 if safe, 1 if would create circular reference
+validate_symlink_not_circular() {
+  local symlink_path="$1"   # Where the symlink will be created
+  local target_path="$2"    # What the symlink will point to
+
+  # Get absolute paths for comparison
+  local symlink_dir
+  symlink_dir=$(cd "$(dirname "$symlink_path")" 2>/dev/null && pwd -P)
+  [ -z "$symlink_dir" ] && return 0  # Parent doesn't exist yet, safe to create
+
+  local symlink_abs="$symlink_dir/$(basename "$symlink_path")"
+
+  # Resolve the target relative to the symlink location
+  local target_abs
+  if [[ "$target_path" == /* ]]; then
+    target_abs="$target_path"
+  else
+    target_abs="$symlink_dir/$target_path"
+  fi
+
+  # Normalize path (remove ./ and resolve ../)
+  local target_dir_resolved
+  target_dir_resolved=$(cd "$(dirname "$target_abs")" 2>/dev/null && pwd -P)
+
+  # If directory resolution failed (doesn't exist), assume safe to create
+  # The target directory not existing is fine - it will be created
+  if [ -z "$target_dir_resolved" ]; then
+    return 0  # Can't determine circular, assume safe
+  fi
+
+  target_abs="$target_dir_resolved/$(basename "$target_abs")"
+
+  # Check if symlink would point to itself
+  if [ "$symlink_abs" = "$target_abs" ]; then
+    return 1  # Would point to itself
+  fi
+
+  # Check if target is under the symlink path (would create loop)
+  if [[ "$target_abs" == "$symlink_abs"/* ]]; then
+    return 1  # Target is under symlink, would create loop
+  fi
+
+  return 0  # Safe
+}
+
 
 # ============================================================================
 # Helper Functions
@@ -107,7 +239,82 @@ print_error() {
   echo "✗ $1" >&2
 }
 
+# Acquire installation lock to prevent concurrent installations
+# Uses mkdir for atomic lock creation (works across all platforms)
+acquire_lock() {
+  local lock_dir
+  lock_dir=$(dirname "$LOCK_FILE")
+
+  # Create parent directory if needed
+  mkdir -p "$lock_dir" 2>/dev/null
+
+  # Try to create lock file atomically using mkdir
+  # mkdir is atomic and will fail if directory already exists
+  local lock_tmp="${LOCK_FILE}.$$"
+
+  # Helper to clean up temp lock directory
+  cleanup_tmp_lock() {
+    rm -rf "$lock_tmp" 2>/dev/null
+  }
+
+  if mkdir "$lock_tmp" 2>/dev/null; then
+    # Successfully created temp lock dir, write pid
+    echo "$$" > "$lock_tmp/pid"
+    # Try atomic rename to actual lock location
+    if mv "$lock_tmp" "$LOCK_FILE" 2>/dev/null; then
+      LOCK_ACQUIRED="1"
+      return 0
+    else
+      # Another process got the lock first, clean up our temp dir
+      cleanup_tmp_lock
+      return 1
+    fi
+  fi
+
+  # Lock exists - check if it's stale (process no longer running)
+  if [ -f "$LOCK_FILE/pid" ]; then
+    local lock_pid
+    lock_pid=$(cat "$LOCK_FILE/pid" 2>/dev/null)
+    if [ -n "$lock_pid" ] && ! kill -0 "$lock_pid" 2>/dev/null; then
+      # Process is dead, remove stale lock
+      rm -rf "$LOCK_FILE" 2>/dev/null
+
+      # Retry with backoff - another process might race us
+      local retry
+      for retry in 1 2 3; do
+        if mkdir "$lock_tmp" 2>/dev/null; then
+          echo "$$" > "$lock_tmp/pid"
+          if mv "$lock_tmp" "$LOCK_FILE" 2>/dev/null; then
+            LOCK_ACQUIRED="1"
+            return 0
+          else
+            cleanup_tmp_lock
+            # Another process won the race, sleep briefly and retry
+            sleep "0.$retry"
+          fi
+        else
+          # Lock dir exists now (another process created it), give up
+          break
+        fi
+      done
+    fi
+  fi
+
+  return 1  # Could not acquire lock
+}
+
+# Release installation lock
+release_lock() {
+  if [ -n "$LOCK_ACQUIRED" ] && [ -d "$LOCK_FILE" ]; then
+    rm -rf "$LOCK_FILE" 2>/dev/null
+    LOCK_ACQUIRED=""
+  fi
+}
+
 cleanup() {
+  # Release lock if we hold it
+  release_lock
+
   if [ -n "$TEMP_DIR" ] && [ -d "$TEMP_DIR" ]; then
     rm -rf "$TEMP_DIR"
   fi
@@ -192,7 +399,7 @@ get_project_repo() {
 }
 
 # Parse source repo like "plaited/development-skills"
-# Returns: repo_url sparse_path (always .claude)
+# Returns: repo_url sparse_path (always .plaited)
 parse_source() {
   local repo="$1"
 
@@ -208,7 +415,7 @@ parse_source() {
     return 1
   fi
 
-  echo "https://github.com/$repo.git" ".claude"
+  echo "https://github.com/$repo.git" ".plaited"
 }
 
 # ============================================================================
@@ -522,69 +729,428 @@ remove_project_scoped_content() {
 # Agent Detection
 # ============================================================================
 
-detect_agent() {
+detect_agents() {
   # Agent detection: directory -> agent name mapping
-  # Using loop for maintainability (easier to add new agents)
-  local agents=".gemini:gemini .github:copilot .cursor:cursor .opencode:opencode .amp:amp .goose:goose .factory:factory .codex:codex .windsurf:windsurf .claude:claude"
+  # Returns space-separated list of detected agents
+  # Note: copilot requires .github/skills to avoid false positives from GitHub Actions
+  local agents=".gemini:gemini .cursor:cursor .opencode:opencode .amp:amp .goose:goose .factory:factory .codex:codex .windsurf:windsurf .claude:claude"
+  local detected=""
 
   for entry in $agents; do
     local dir="${entry%%:*}"
     local agent="${entry#*:}"
     if [ -d "$dir" ]; then
-      echo "$agent"
-      return 0
+      detected="$detected $agent"
     fi
   done
 
-  echo ""
+  # Special case: copilot needs .github/skills (not just .github which is common for GitHub Actions)
+  if [ -d ".github/skills" ]; then
+    detected="$detected copilot"
+  fi
+
+  echo "$detected" | xargs  # Trim whitespace
 }
 
-ask_agent() {
+# Check if .github exists but without skills (potential copilot user)
+has_github_without_skills() {
+  [ -d ".github" ] && [ ! -d ".github/skills" ]
+}
+
+# All supported agents in order
+ALL_AGENTS="gemini copilot cursor opencode amp goose factory codex windsurf claude"
+
+# Get agent display name
+get_agent_display_name() {
+  case "$1" in
+    gemini)   echo "Gemini" ;;
+    copilot)  echo "Copilot" ;;
+    cursor)   echo "Cursor" ;;
+    opencode) echo "OpenCode" ;;
+    amp)      echo "Amp" ;;
+    goose)    echo "Goose" ;;
+    factory)  echo "Factory" ;;
+    codex)    echo "Codex" ;;
+    windsurf) echo "Windsurf" ;;
+    claude)   echo "Claude" ;;
+    *)        echo "$1" ;;
+  esac
+}
+
+# Interactive multi-select for agents
+# Returns space-separated list of selected agent names
+ask_agents_multiselect() {
   local detected
-  detected=$(detect_agent)
+  detected=$(detect_agents)
 
-  echo "Which AI coding agent are you using?"
-  echo ""
-  echo "  ┌──────────────┬────────────────────┐"
-  echo "  │ Agent        │ Directory          │"
-  echo "  ├──────────────┼────────────────────┤"
-  echo "  │ 1) Gemini    │ .gemini/skills     │"
-  echo "  │ 2) Copilot   │ .github/skills     │"
-  echo "  │ 3) Cursor    │ .cursor/skills     │"
-  echo "  │ 4) OpenCode  │ .opencode/skill    │"
-  echo "  │ 5) Amp       │ .amp/skills        │"
-  echo "  │ 6) Goose     │ .goose/skills      │"
-  echo "  │ 7) Factory   │ .factory/skills    │"
-  echo "  │ 8) Codex     │ .codex/skills      │"
-  echo "  │ 9) Windsurf  │ .windsurf/skills   │"
-  echo "  │ 10) Claude   │ .claude/skills     │"
-  echo "  └──────────────┴────────────────────┘"
-  echo ""
-
-  if [ -n "$detected" ]; then
-    echo "  Detected: $detected"
+  # If .github exists but no skills/, ask user about copilot
+  local suggest_copilot=""
+  if has_github_without_skills && [ -z "$detected" ]; then
+    echo ""
+    echo "  Found .github/ directory but no .github/skills/"
+    printf "  Are you using GitHub Copilot? [y/N]: "
+    read -r answer
+    if [[ "$answer" =~ ^[Yy] ]]; then
+      suggest_copilot="copilot"
+    fi
     echo ""
   fi
 
-  printf "Select agent [1-10]: "
-  read choice
+  # Initialize selection array (1=selected, 0=not selected)
+  # Pre-select detected agents (and copilot if user confirmed)
+  local -a selected=()
+  local i=0
+  for agent in $ALL_AGENTS; do
+    if [[ " $detected $suggest_copilot " =~ " $agent " ]]; then
+      selected[$i]=1
+    else
+      selected[$i]=0
+    fi
+    i=$((i + 1))
+  done
 
-  case "$choice" in
-    1) echo "gemini" ;;
-    2) echo "copilot" ;;
-    3) echo "cursor" ;;
-    4) echo "opencode" ;;
-    5) echo "amp" ;;
-    6) echo "goose" ;;
-    7) echo "factory" ;;
-    8) echo "codex" ;;
-    9) echo "windsurf" ;;
-    10) echo "claude" ;;
-    *)
-      print_error "Invalid choice"
-      exit 1
-      ;;
-  esac
+  # Current cursor position
+  local cursor=0
+  # Calculate number of agents dynamically from ALL_AGENTS
+  local num_agents
+  num_agents=$(echo "$ALL_AGENTS" | wc -w | tr -d ' ')
+
+  # Function to render the menu
+  render_menu() {
+    # Move cursor up to redraw (if not first render)
+    if [ "$1" = "redraw" ]; then
+      # Move cursor up to overwrite previous menu render
+      # Total lines rendered:
+      #   1 (title "Select target agents...")
+      #   1 (empty line)
+      #   3 (table header: top border, header row, separator)
+      #   num_agents (one row per agent)
+      #   1 (table footer: bottom border)
+      # = num_agents + 6 lines total
+      #
+      # We move up (num_agents + 5) because the cursor is already on the line
+      # after the last printed line, so we need to go back 5 lines + num_agents
+      # to reach the title line where we start printing.
+      printf "\033[%dA" $((num_agents + 5))
+    fi
+
+    echo "Select target agents (space to toggle, enter to confirm):"
+    echo ""
+    echo "  ┌────┬──────────────┬────────────────────┐"
+    echo "  │    │ Agent        │ Directory          │"
+    echo "  ├────┼──────────────┼────────────────────┤"
+
+    local idx=0
+    for agent in $ALL_AGENTS; do
+      local checkbox
+      if [ "${selected[$idx]}" = "1" ]; then
+        checkbox="[x]"
+      else
+        checkbox="[ ]"
+      fi
+
+      local pointer=" "
+      if [ "$idx" = "$cursor" ]; then
+        pointer=">"
+      fi
+
+      local display_name
+      display_name=$(get_agent_display_name "$agent")
+      local skills_dir
+      skills_dir=$(get_skills_dir "$agent")
+
+      # Format with padding
+      printf "  │ %s%s │ %-12s │ %-18s │\n" "$pointer" "$checkbox" "$display_name" "$skills_dir"
+      idx=$((idx + 1))
+    done
+
+    echo "  └────┴──────────────┴────────────────────┘"
+  }
+
+  # Initial render
+  render_menu "first"
+
+  # Read input
+  while true; do
+    # Read single character
+    IFS= read -rsn1 key
+
+    case "$key" in
+      # Arrow keys start with escape
+      $'\x1b')
+        read -rsn2 -t 0.1 key2
+        case "$key2" in
+          '[A') # Up arrow
+            cursor=$((cursor - 1))
+            if [ "$cursor" -lt 0 ]; then
+              cursor=$((num_agents - 1))
+            fi
+            ;;
+          '[B') # Down arrow
+            cursor=$((cursor + 1))
+            if [ "$cursor" -ge "$num_agents" ]; then
+              cursor=0
+            fi
+            ;;
+        esac
+        render_menu "redraw"
+        ;;
+      ' ') # Space - toggle selection
+        if [ "${selected[$cursor]}" = "1" ]; then
+          selected[$cursor]=0
+        else
+          selected[$cursor]=1
+        fi
+        render_menu "redraw"
+        ;;
+      '') # Enter - confirm
+        break
+        ;;
+      [1-9]|0) # Number keys for quick toggle (1-9, 0 for 10)
+        local num_idx
+        if [ "$key" = "0" ]; then
+          num_idx=9
+        else
+          num_idx=$((key - 1))
+        fi
+        if [ "$num_idx" -lt "$num_agents" ]; then
+          if [ "${selected[$num_idx]}" = "1" ]; then
+            selected[$num_idx]=0
+          else
+            selected[$num_idx]=1
+          fi
+          cursor=$num_idx
+          render_menu "redraw"
+        fi
+        ;;
+      'j') # vim-style down
+        cursor=$((cursor + 1))
+        if [ "$cursor" -ge "$num_agents" ]; then
+          cursor=0
+        fi
+        render_menu "redraw"
+        ;;
+      'k') # vim-style up
+        cursor=$((cursor - 1))
+        if [ "$cursor" -lt 0 ]; then
+          cursor=$((num_agents - 1))
+        fi
+        render_menu "redraw"
+        ;;
+      'a') # Select all
+        for ((i=0; i<num_agents; i++)); do
+          selected[$i]=1
+        done
+        render_menu "redraw"
+        ;;
+      'n') # Select none
+        for ((i=0; i<num_agents; i++)); do
+          selected[$i]=0
+        done
+        render_menu "redraw"
+        ;;
+    esac
+  done
+
+  # Build result
+  local result=""
+  local idx=0
+  for agent in $ALL_AGENTS; do
+    if [ "${selected[$idx]}" = "1" ]; then
+      result="$result $agent"
+    fi
+    idx=$((idx + 1))
+  done
+
+  # Trim and return
+  echo "$result" | xargs
+
+  # Validate at least one agent selected
+  if [ -z "$(echo "$result" | xargs)" ]; then
+    print_error "No agents selected"
+    exit 1
+  fi
+}
+
+# ============================================================================
+# Symlink Management Functions
+# ============================================================================
+
+# Create symlinks from agent skills directories to central storage
+# Arguments: space-separated list of agents
+# Reads skills from CENTRAL_SKILLS_DIR and creates symlinks in each agent's skills dir
+create_agent_symlinks() {
+  local agents="$1"
+
+  if [ -z "$agents" ]; then
+    echo "0"  # Return failure count
+    return 0
+  fi
+
+  # Check if central skills directory exists and has skills
+  if [ ! -d "$CENTRAL_SKILLS_DIR" ]; then
+    print_info "No skills in central directory to symlink"
+    echo "0"
+    return 0
+  fi
+
+  local skills_count=0
+  for skill_folder in "$CENTRAL_SKILLS_DIR"/*; do
+    [ -d "$skill_folder" ] && skills_count=$((skills_count + 1))
+  done
+
+  if [ "$skills_count" -eq 0 ]; then
+    print_info "No skills in central directory to symlink"
+    echo "0"
+    return 0
+  fi
+
+  print_info "Creating symlinks for $skills_count skill(s)..."
+
+  # Track symlink failures
+  local failed_count=0
+
+  for agent in $agents; do
+    local agent_skills_dir
+    agent_skills_dir=$(get_skills_dir "$agent")
+
+    if [ -z "$agent_skills_dir" ]; then
+      print_error "Unknown agent: $agent"
+      continue
+    fi
+
+    # Create agent skills directory if it doesn't exist
+    mkdir -p "$agent_skills_dir"
+
+    local agent_display
+    agent_display=$(get_agent_display_name "$agent")
+    print_info "  $agent_display ($agent_skills_dir/):"
+
+    for skill_folder in "$CENTRAL_SKILLS_DIR"/*; do
+      [ -d "$skill_folder" ] || continue
+
+      local skill_name
+      skill_name=$(basename "$skill_folder")
+      local symlink_path="$agent_skills_dir/$skill_name"
+      local relative_target
+      relative_target=$(get_relative_symlink_path "$agent_skills_dir" "$skill_name")
+
+      # Check for existing content
+      if [ -e "$symlink_path" ] || [ -L "$symlink_path" ]; then
+        local action
+        action=$(handle_existing_skill "$symlink_path" "$skill_name")
+        case "$action" in
+          replace)
+            rm -rf "$symlink_path"
+            ;;
+          skip)
+            print_info "    Skipped: $skill_name"
+            continue
+            ;;
+          abort)
+            print_error "Installation aborted by user"
+            echo "$failed_count"
+            return 1
+            ;;
+        esac
+      fi
+
+      # Verify target exists in central storage before creating symlink
+      if [ ! -d "$CENTRAL_SKILLS_DIR/$skill_name" ]; then
+        print_error "    Target does not exist: $skill_name"
+        failed_count=$((failed_count + 1))
+        continue
+      fi
+
+      # Validate symlink won't create circular reference
+      if ! validate_symlink_not_circular "$symlink_path" "$relative_target"; then
+        print_error "    Circular symlink detected: $skill_name"
+        failed_count=$((failed_count + 1))
+        continue
+      fi
+
+      # Create symlink
+      local ln_error
+      if ln_error=$(ln -s "$relative_target" "$symlink_path" 2>&1); then
+        print_info "    Linked: $skill_name"
+      else
+        print_error "    Failed to link: $skill_name -> $relative_target"
+        print_error "      Path: $symlink_path"
+        print_error "      Error: $ln_error"
+        failed_count=$((failed_count + 1))
+      fi
+    done
+  done
+
+  echo "$failed_count"
+  return 0
+}
+
+# Remove symlinks from agent skills directories that point to central storage
+# Arguments: space-separated list of agents, optional project_name to filter by scope
+remove_agent_symlinks() {
+  local agents="$1"
+  local project_name="$2"  # Optional: only remove symlinks for this project
+
+  local removed=0
+
+  for agent in $agents; do
+    local agent_skills_dir
+    agent_skills_dir=$(get_skills_dir "$agent")
+
+    if [ -z "$agent_skills_dir" ] || [ ! -d "$agent_skills_dir" ]; then
+      continue
+    fi
+
+    for symlink in "$agent_skills_dir"/*; do
+      # Only process symlinks
+      [ -L "$symlink" ] || continue
+
+      local skill_name
+      skill_name=$(basename "$symlink")
+
+      # If project filter specified, only remove matching scoped skills
+      if [ -n "$project_name" ]; then
+        local repo
+        repo=$(get_project_repo "$project_name")
+        if [ -n "$repo" ]; then
+          local scope
+          scope=$(get_skill_scope_prefix "$repo")
+          # Use glob pattern matching (==) for consistency with security patterns
+          # Pattern *@${scope} matches skill names ending with @org_project
+          if [ -n "$scope" ] && [[ ! "$skill_name" == *"@${scope}" ]]; then
+            continue  # Skip - doesn't match project scope
+          fi
+        fi
+      fi
+
+      # Check if symlink points to our central storage
+      # Use strict pattern matching to only match our relative symlinks
+      # Our symlinks are always relative paths like ../../.plaited/skills/skill-name
+      local target
+      target=$(readlink "$symlink" 2>/dev/null)
+      # Match: starts with ../ and contains .plaited/skills/, OR starts with .plaited/skills/
+      if [[ "$target" == "../"*".plaited/skills/"* ]] || [[ "$target" == ".plaited/skills/"* ]]; then
+        # Additional security: verify the resolved path is actually within central storage
+        # This prevents removing symlinks that just happen to match the pattern string
+        # but point elsewhere (e.g., a crafted symlink)
+        local resolved_target
+        resolved_target=$(cd "$(dirname "$symlink")" 2>/dev/null && cd "$(dirname "$target")" 2>/dev/null && pwd -P)
+        if [ -n "$resolved_target" ]; then
+          local central_abs
+          central_abs=$(cd "$CENTRAL_SKILLS_DIR" 2>/dev/null && pwd -P)
+          # Only remove if resolved path is within central storage
+          if [ -n "$central_abs" ] && [[ "$resolved_target" == "$central_abs"* ]]; then
+            rm -f "$symlink"
+            print_info "  Removed symlink: $skill_name (from $agent)"
+            removed=$((removed + 1))
+          fi
+        fi
+      fi
+    done
+  done
+
+  echo "$removed"
 }
 
 # ============================================================================
@@ -832,35 +1398,34 @@ install_project_with_dependencies() {
 }
 
 do_install() {
-  local agent="$1"
+  local agents="$1"           # Space-separated list of agents
   local specific_project="$2"
-  local skills_dir_override="$3"
 
-  local skills_dir
-  # Use override if provided, otherwise get from agent
-  if [ -n "$skills_dir_override" ]; then
-    skills_dir="$skills_dir_override"
-  else
-    skills_dir=$(get_skills_dir "$agent")
-  fi
-
-  if [ -z "$skills_dir" ]; then
-    print_error "Unknown agent: $agent (use --skills-dir to specify custom directory)"
+  # Acquire lock to prevent concurrent installations
+  if ! acquire_lock; then
+    print_error "Another installation is in progress"
+    print_info "If this is an error, remove $LOCK_FILE manually"
     return 1
   fi
 
-  print_info "Installing for: $agent"
-  print_info "Skills: $skills_dir/"
+  print_info "Central storage: $CENTRAL_SKILLS_DIR/"
+  print_info "Target agents: $agents"
   echo ""
 
   TEMP_DIR=$(mktemp -d)
-  mkdir -p "$skills_dir"
+  mkdir -p "$CENTRAL_SKILLS_DIR"
 
   # Reset tracking for this session
   INSTALLED_PROJECTS=""
   FAILED_PROJECTS=""
 
   local projects_installed=0
+
+  # ========================================
+  # Phase 1: Install skills to central directory
+  # ========================================
+  print_info "Phase 1: Installing skills to central storage..."
+  echo ""
 
   # Get all project names
   local project_names
@@ -878,9 +1443,9 @@ do_install() {
       continue
     fi
 
-    # Install project with dependencies
+    # Install project with dependencies (to central directory)
     # Return codes: 0=success, 1=failure, 2=partial (project ok, some deps failed)
-    install_project_with_dependencies "$project_name" "$skills_dir"
+    install_project_with_dependencies "$project_name" "$CENTRAL_SKILLS_DIR"
     local install_result=$?
 
     if [ "$install_result" -eq 1 ]; then
@@ -900,15 +1465,51 @@ do_install() {
     return 1
   fi
 
+  # ========================================
+  # Phase 2: Create symlinks to agent directories
+  # ========================================
+  echo ""
+  print_info "Phase 2: Creating symlinks to agent directories..."
+  echo ""
+
+  local symlink_failures=0
+  symlink_failures=$(create_agent_symlinks "$agents")
+  local symlink_exit=$?
+
+  if [ "$symlink_exit" -ne 0 ]; then
+    print_error "Symlink creation was aborted"
+  fi
+
+  # Count skills in central directory
+  local skills_count=0
+  for skill_folder in "$CENTRAL_SKILLS_DIR"/*; do
+    [ -d "$skill_folder" ] && skills_count=$((skills_count + 1))
+  done
+
   echo ""
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   echo "  Installation Complete!"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   echo ""
-  echo "  Agent: $agent"
   echo "  Projects installed: $projects_installed"
+  echo "  Skills installed: $skills_count"
   echo ""
-  echo "  Location: $skills_dir/"
+  echo "  Central storage: $CENTRAL_SKILLS_DIR/"
+  echo "  Symlinked to:"
+  for agent in $agents; do
+    local agent_skills_dir
+    agent_skills_dir=$(get_skills_dir "$agent")
+    local agent_display
+    agent_display=$(get_agent_display_name "$agent")
+    echo "    - $agent_display: $agent_skills_dir/"
+  done
+
+  # Report any failed symlinks
+  if [ "$symlink_failures" -gt 0 ]; then
+    echo ""
+    echo "  Warning: $symlink_failures symlink(s) failed to create"
+    echo "  Check permissions and try again, or create symlinks manually."
+  fi
 
   # Report any failed dependencies
   if [ -n "$FAILED_PROJECTS" ]; then
@@ -922,7 +1523,7 @@ do_install() {
   fi
   echo ""
   echo "  Next steps:"
-  echo "    1. Restart your AI coding agent to load the new skills"
+  echo "    1. Restart your AI coding agents to load the new skills"
   echo "    2. Skills are auto-discovered and activated when relevant"
   echo ""
 }
@@ -945,7 +1546,7 @@ do_list() {
 
   echo ""
   echo "Install a specific project:"
-  echo "  ./install.sh --agent gemini --project development-skills"
+  echo "  ./install.sh --agents claude,gemini --project development-skills"
   echo ""
 }
 
@@ -954,48 +1555,82 @@ do_list() {
 # ============================================================================
 
 do_uninstall() {
-  local agent="$1"
+  local agents="$1"           # Space-separated list of agents (optional)
   local specific_project="$2"
-  local skills_dir_override="$3"
 
-  # Use provided agent or detect from existing installation
-  if [ -z "$agent" ]; then
-    agent=$(detect_agent)
-    if [ -z "$agent" ]; then
-      print_error "No existing installation detected"
-      print_info "Specify --agent to uninstall a specific agent"
-      exit 1
+  # Acquire lock to prevent concurrent operations
+  if ! acquire_lock; then
+    print_error "Another installation/uninstallation is in progress"
+    print_info "If this is an error, remove $LOCK_FILE manually"
+    return 1
+  fi
+
+  # If no agents specified, uninstall from all agents that have symlinks
+  if [ -z "$agents" ]; then
+    agents="$ALL_AGENTS"
+  fi
+
+  print_info "Uninstalling Plaited skills..."
+  echo ""
+
+  local symlinks_removed=0
+  local skills_removed=0
+
+  # ========================================
+  # Phase 1: Remove symlinks from agent directories
+  # ========================================
+  print_info "Phase 1: Removing symlinks from agent directories..."
+
+  local count
+  count=$(remove_agent_symlinks "$agents" "$specific_project")
+  symlinks_removed=$count
+
+  # ========================================
+  # Phase 2: Remove skills from central storage
+  # ========================================
+  echo ""
+  print_info "Phase 2: Removing skills from central storage..."
+
+  if [ -d "$CENTRAL_SKILLS_DIR" ]; then
+    local project_names
+    project_names=$(get_project_names)
+
+    for project_name in $project_names; do
+      if [ -n "$specific_project" ] && [ "$project_name" != "$specific_project" ]; then
+        continue
+      fi
+      local count
+      count=$(remove_project_scoped_content "" "$project_name" "$CENTRAL_SKILLS_DIR")
+      skills_removed=$((skills_removed + count))
+    done
+
+    # Remove central directory if empty
+    if [ -d "$CENTRAL_SKILLS_DIR" ]; then
+      local remaining=0
+      for item in "$CENTRAL_SKILLS_DIR"/*; do
+        [ -e "$item" ] && remaining=$((remaining + 1))
+      done
+      if [ "$remaining" -eq 0 ]; then
+        rmdir "$CENTRAL_SKILLS_DIR" 2>/dev/null
+        # Also remove .plaited if empty
+        if [ -d ".plaited" ]; then
+          rmdir ".plaited" 2>/dev/null
+        fi
+      fi
     fi
   fi
 
-  print_info "Uninstalling for: $agent"
-
-  local skills_dir
-  # Use override if provided, otherwise get from agent
-  if [ -n "$skills_dir_override" ]; then
-    skills_dir="$skills_dir_override"
+  echo ""
+  if [ "$symlinks_removed" -eq 0 ] && [ "$skills_removed" -eq 0 ]; then
+    print_info "No Plaited skills found to uninstall"
   else
-    skills_dir=$(get_skills_dir "$agent")
-  fi
-
-  local project_names
-  project_names=$(get_project_names)
-  local removed=0
-
-  for project_name in $project_names; do
-    if [ -n "$specific_project" ] && [ "$project_name" != "$specific_project" ]; then
-      continue
-    fi
-    local count
-    count=$(remove_project_scoped_content "$agent" "$project_name" "$skills_dir")
-    removed=$((removed + count))
-  done
-
-  if [ "$removed" -eq 0 ]; then
-    print_info "No Plaited skills found in $skills_dir/"
-  else
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  Uninstall Complete!"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
-    print_success "Uninstalled $removed skill(s)"
+    echo "  Symlinks removed: $symlinks_removed"
+    echo "  Skills removed: $skills_removed"
+    echo ""
   fi
 }
 
@@ -1007,11 +1642,11 @@ show_help() {
   echo "Usage: install.sh [OPTIONS]"
   echo ""
   echo "Install Plaited skills for AI coding agents supporting agent-skills-spec."
+  echo "Skills are stored centrally in .plaited/skills/ and symlinked to agent directories."
   echo ""
   echo "Options:"
-  echo "  --agent <name>       Install for specific agent"
+  echo "  --agents <list>      Comma-separated list of agents (e.g., claude,gemini)"
   echo "  --project <name>     Install specific project only"
-  echo "  --skills-dir <path>  Override skills directory"
   echo "  --list               List available projects"
   echo "  --uninstall          Remove installation"
   echo "  --help               Show this help message"
@@ -1034,31 +1669,27 @@ show_help() {
   echo "  └──────────────┴──────────────────────┘"
   echo ""
   echo "Examples:"
-  echo "  ./install.sh                              # Interactive mode"
-  echo "  ./install.sh --agent gemini               # Install all for Gemini"
-  echo "  ./install.sh --agent cursor --project development-skills"
+  echo "  ./install.sh                              # Interactive: multi-select agents"
+  echo "  ./install.sh --agents claude,gemini       # Install for Claude and Gemini"
+  echo "  ./install.sh --agents cursor --project development-skills"
   echo "  ./install.sh --list                       # List available projects"
   echo "  ./install.sh --uninstall                  # Remove all"
 }
 
 main() {
-  local agent=""
+  local agents=""  # Space-separated list of agents
   local project=""
-  local skills_dir_override=""
   local action="install"
 
   while [ $# -gt 0 ]; do
     case "$1" in
-      --agent)
-        agent="$2"
+      --agents)
+        # Convert comma-separated to space-separated
+        agents=$(echo "$2" | tr ',' ' ')
         shift 2
         ;;
       --project)
         project="$2"
-        shift 2
-        ;;
-      --skills-dir)
-        skills_dir_override="$2"
         shift 2
         ;;
       --list)
@@ -1134,12 +1765,34 @@ main() {
       do_list
       ;;
     install)
-      if [ -z "$agent" ]; then
-        agent=$(ask_agent)
+      # If no agents specified, use interactive or auto-detect
+      # [ -t 0 ] checks if stdin (fd 0) is connected to a terminal (TTY)
+      if [ -z "$agents" ]; then
+        if [ -t 0 ]; then
+          # Interactive mode: TTY available on stdin, use multi-select menu
+          agents=$(ask_agents_multiselect)
+        else
+          # Headless mode: no TTY on stdin (piped/CI), auto-detect agents
+          agents=$(detect_agents)
+          if [ -z "$agents" ]; then
+            # Check if .github exists without skills - might be a copilot user
+            if has_github_without_skills; then
+              print_error "No agents detected (.github exists but has no skills/ directory)"
+              print_info "If using GitHub Copilot, specify it explicitly:"
+              print_info "  ./install.sh --agents copilot"
+            else
+              print_error "No agents specified and none detected"
+            fi
+            print_info "In headless mode, use --agents to specify targets:"
+            print_info "  ./install.sh --agents claude,gemini"
+            exit 1
+          fi
+          print_info "Headless mode: auto-detected agents: $agents"
+        fi
       fi
 
-      # Validate agent (unless custom dir provided)
-      if [ -z "$skills_dir_override" ]; then
+      # Validate all agents
+      for agent in $agents; do
         local skills_dir
         skills_dir=$(get_skills_dir "$agent")
         if [ -z "$skills_dir" ]; then
@@ -1147,12 +1800,12 @@ main() {
           print_info "Valid agents: gemini, copilot, cursor, opencode, amp, goose, factory, codex, windsurf, claude"
           exit 1
         fi
-      fi
+      done
 
-      do_install "$agent" "$project" "$skills_dir_override"
+      do_install "$agents" "$project"
       ;;
     uninstall)
-      do_uninstall "$agent" "$project" "$skills_dir_override"
+      do_uninstall "$agents" "$project"
       ;;
   esac
 }
